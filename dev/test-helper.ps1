@@ -41,8 +41,12 @@ function Call([string]$method, [string]$path, $body = $null, [hashtable]$headers
         $resp = $_.Exception.Response
         if ($null -eq $resp) { throw }
         $status = [int]$resp.StatusCode
-        $sr = New-Object System.IO.StreamReader($resp.GetResponseStream(), $utf8)
+        # Windows PowerShell has already read the body of an error answer once: rewind before reading it again.
+        $stream = $resp.GetResponseStream()
+        try { $stream.Position = 0 } catch { }
+        $sr = New-Object System.IO.StreamReader($stream, $utf8)
         $text = $sr.ReadToEnd()
+        if ($text -eq '' -and $null -ne $_.ErrorDetails) { $text = [string]$_.ErrorDetails.Message }
     }
     $json = $null
     try { $json = $text | ConvertFrom-Json } catch { }
@@ -172,6 +176,7 @@ try {
     Set-Scenario 'badhash'
     $before = Get-Hashes
     $c = Call 'POST' '/api/update/apply'
+    Write-Host "      helper said: $($c.text)"
     Check ($c.status -eq 500 -and $c.text -match 'checksum') 'wrong checksum: update refused'
     Check ((Get-Hashes) -eq $before) 'wrong checksum: installed files untouched'
     Check ((Call 'GET' '/api/state').json.version -eq $cur) 'wrong checksum: helper keeps running'
@@ -196,6 +201,7 @@ try {
     $before = Get-Hashes
     $lock = [System.IO.File]::Open((Join-Path $Install 'Start-FocusQuest.cmd'), 'Open', 'Read', 'None')
     try { $c = Call 'POST' '/api/update/apply' } finally { $lock.Close() }
+    Write-Host "      helper said: $($c.text)"
     Check ($c.status -eq 500 -and $c.text -match 'put back') 'a file cannot be replaced: update stops'
     Check ((Get-Hashes) -eq $before) 'a file cannot be replaced: the files already copied are put back'
     Check ((Call 'GET' '/api/state').json.version -eq '9.9.8') 'a file cannot be replaced: helper keeps running as 9.9.8'
