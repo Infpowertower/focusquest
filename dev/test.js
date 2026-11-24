@@ -106,7 +106,8 @@ const PORT = +process.env.FQ_PORT || 8765, JPORT = +process.env.FQ_JIRA_PORT || 
     const c = await page.evaluate(() => S.ticketCfg);
     assert.equal(c.forms[1].fields.length, 2, 'copy keeps the fields'); assert.equal(c.forms[2].fields.length, 0);
     assert.equal(c.defaultForm, c.forms[0].id);
-    assert.match(await page.textContent('#form-tabs'), /Task in OPS\s*default.*Service request.*Task in HR/s);
+    // the settings are redrawn a moment after the change
+    await page.waitForFunction(() => /Task in OPS\s*default.*Service request.*Task in HR/s.test(document.querySelector('#form-tabs').textContent));
     // switching the edited form shows its own values
     await page.check('#form-tabs label:has-text("Service request") input');
     assert.equal(await page.inputValue('#fm-type'), 'Service Request');
