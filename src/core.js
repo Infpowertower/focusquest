@@ -52,7 +52,7 @@ function defaults() {
     v: 2, rev: 0, items: [],
     game: { xp: 0, log: [], streak: { count: 0, last: null, best: 0 }, counts: {}, days: {}, badges: {} },
     settings: {
-      sound: true, motion: true, theme: 'auto', sort: 'prio', dayRemindTime: '09:00', refreshMin: 15,
+      sound: true, motion: true, theme: 'auto', sort: 'prio', dayRemindTime: '09:00', refreshMin: 15, updateCheck: true,
       jql: 'assignee = currentUser() AND resolution = Unresolved ORDER BY updated DESC'
     },
     // forms: one per kind of ticket you create (Jira project + ticket type + its fields). Templates belong to a form.
@@ -109,7 +109,8 @@ const defForm = () => formById(S.ticketCfg.defaultForm) || S.ticketCfg.forms[0];
 const formLabel = f => f.name || (f.project ? `${f.type} in ${f.project}` : f.type);
 
 let S = defaults();
-let meta = { jira: { baseUrl: '', hasToken: false } };
+let meta = { version: '', jira: { baseUrl: '', hasToken: false } };
+let UPD = null;               // answer of the last update check (from the helper)
 let me = null;                // Jira user (from /myself)
 let loadFailed = false;
 let helperDown = false;
@@ -152,6 +153,7 @@ async function loadState() {
   let raw = null;
   if (SERVED) {
     meta = await api('GET', '/api/state');
+    if (!meta.version) meta.version = '';
     const r = await fetch('/api/data', { headers: { 'X-FQ-Token': TOKEN } });
     const t = await r.text();
     if (!r.ok) throw new Error('The data file could not be read.');

@@ -234,6 +234,42 @@ const PORT = +process.env.FQ_PORT || 8765, JPORT = +process.env.FQ_JIRA_PORT || 
     const raw = require('fs').readFileSync(dataFile, 'utf8');
     assert.ok(!raw.includes('testtoken'), 'token must not be in the data file');
   });
+  await step('update: quiet notice, notes, install, restart', async () => {
+    await page.waitForSelector('.conn.upd');               // found by the automatic check after the start
+    await page.click('[data-view=settings]');
+    assert.match(await page.textContent('#upd-state'), /You have version 1\.0\.0\. Version 1\.1\.0 is available/);
+    // a check that fails is one quiet line, nothing else
+    await page.route('**/api/update/check*', r => r.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: false, available: false, current: '1.0.0', latest: '', notes: '', message: 'GitHub could not be reached: test', checkedAt: new Date().toISOString() }) }));
+    await page.click('[data-act=update-check]');
+    await page.waitForFunction(() => /did not work\. GitHub could not be reached/.test(document.querySelector('#upd-state').textContent));
+    assert.equal(await page.locator('.conn.upd, .toast.bad').count(), 0);
+    await page.unroute('**/api/update/check*');
+    await page.click('[data-act=update-check]');
+    await page.waitForSelector('.conn.upd');
+    assert.match(await page.textContent('#railfoot'), /Version 1\.1\.0 is available/);
+    await page.click('.conn.upd');
+    const txt = await page.textContent('.overlay .modal');
+    assert.match(txt, /FocusQuest 1\.1\.0 is available/); assert.match(txt, /You have version 1\.0\.0\. Published 20 November 2026/);
+    assert.match(txt, /Ticket forms for several projects/); assert.ok(!/Download the zip/.test(txt), 'install instructions are left out');
+    await shot('13-update');
+    const n = await page.evaluate(() => S.items.length);
+    await Promise.all([page.waitForNavigation(), page.click('[data-act=update-apply]')]);
+    await page.waitForSelector('#q');
+    await page.waitForSelector('.toast:has-text("FocusQuest 1.1.0 is installed")');
+    assert.equal(await page.evaluate(() => meta.version), '1.1.0');
+    assert.equal(await page.evaluate(() => S.items.length), n);
+    await page.waitForFunction(() => UPD && UPD.ok);
+    assert.equal(await page.locator('.conn.upd').count(), 0);
+    // the automatic check can be switched off
+    await page.click('[data-view=settings]');
+    assert.match(await page.textContent('#upd-state'), /You have version 1\.1\.0\. That is the newest one/);
+    await page.uncheck('input[data-path="settings.updateCheck"]');
+    await page.waitForTimeout(500);
+    await page.reload(); await page.waitForSelector('#q');
+    await page.waitForTimeout(3600);
+    assert.equal(await page.evaluate(() => UPD), null, 'no check when switched off');
+    await page.click('[data-view=board]');
+  });
   await shot('09-board-full');
   await page.click('[data-view=rewards]'); await shot('10-rewards');
   await page.evaluate(() => { S.settings.theme = 'dark'; applyTheme(); }); await page.click('[data-view=board]');

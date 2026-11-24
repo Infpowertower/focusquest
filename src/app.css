@@ -64,6 +64,11 @@ a{color:var(--brand)}
 .conn i{width:9px;height:9px;border-radius:50%;background:#7C83A8;flex:none}
 .conn.ok i{background:#43C99B}
 .conn.bad i{background:#F47480}
+.conn.upd i{background:var(--gold)}
+.conn.upd:hover{color:var(--rail-ink)}
+.notes{max-height:38vh;overflow:auto;margin:6px 0 14px}
+.notes h3{font-size:15px;margin:.9em 0 .3em}
+.notes ul{margin:.3em 0;padding-left:20px}
 
 /* ---------- buttons, inputs */
 .btn{border:1px solid var(--line);background:var(--panel);border-radius:9px;padding:8px 14px;font-weight:600;font-size:14px;white-space:nowrap}

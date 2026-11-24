@@ -9,7 +9,13 @@ A to-do and Jira ticket board that rewards you for getting things done (XP, leve
 3. Extract the zip.
 4. Double-click `Install-FocusQuest.cmd`. It copies the app to `%LOCALAPPDATA%\FocusQuest`, adds a **FocusQuest** entry to the Start menu and starts the app.
 
-To update, download the newer zip and do the same again. Your data is kept. `README.txt` inside the zip explains everyday use and the Jira connection.
+`README.txt` inside the zip explains everyday use and the Jira connection.
+
+## Update
+
+FocusQuest asks GitHub once a day for the newest release (this can be switched off in Settings). When there is one, a quiet line appears at the bottom left; click it to read what is new and install it. The helper downloads the release zip from this repository only, checks its SHA-256 sum, takes only the known program files out of it, keeps the previous version in `data\update\previous`, and restarts. Nothing is installed without your click.
+
+The checksum catches a damaged download. It does not protect against a compromised GitHub account, because zip and checksum come from the same place.
 
 ## Browser version
 
@@ -26,7 +32,7 @@ node dev/build.js --web     # writes app.html and site/
 node dev/run-tests.js       # browser tests against a mock Jira, needs playwright
 ```
 
-The build inlines `src/` into `app.html` and writes the browser version to `site/`. Every push to `main` builds the zip, tests the installer on Windows, publishes the browser version to GitHub Pages, and publishes a release named `<VERSION>.<run number>`; raise the number in `VERSION` for a new major or minor version.
+The build inlines `src/` into `app.html` and writes the browser version to `site/`. Every push is built and tested: the browser tests on Linux, and installer, helper and in-app update on Windows PowerShell 5.1 (`dev/test-helper.ps1`). A push to `main` then publishes the browser version to GitHub Pages, and publishes a release named `<VERSION>.<run number>`; raise the number in `VERSION` for a new major or minor version.
 
 ## License
 

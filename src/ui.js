@@ -52,6 +52,7 @@ function renderRailFoot() {
   else if (helperDown) h = `<button class="conn bad" data-act="view" data-view="settings"><i></i>Helper not running. Start FocusQuest again.</button>`;
   else if (jiraReady()) h = `<button class="conn ok" data-act="view" data-view="settings"><i></i>Jira connected${me ? ' as ' + esc(me.displayName || me.name) : ''}</button>`;
   else h = `<button class="conn" data-act="view" data-view="settings"><i></i>Jira not connected. Set it up</button>`;
+  if (SERVED && UPD && UPD.available) h += `<button class="conn upd" data-act="update-open"><i></i>Version ${esc(UPD.latest)} is available</button>`;
   $('#railfoot').innerHTML = h;
 }
 function renderNav() { $$('#nav button').forEach(b => b.classList.toggle('on', b.dataset.view === UI.view)); }
@@ -843,6 +844,13 @@ function renderSettings() {
       ${ns === 'default' ? `<button class="btn" data-act="notif-on" style="margin-top:8px">Turn on notifications</button>` : ns === 'granted' ? `<button class="btn" data-act="notif-test" style="margin-top:8px">Send a test reminder</button>` : ''}
     </div>
 
+    ${SERVED ? `<div class="card"><h2>Updates</h2>
+      <p class="lead" id="upd-state">${updState()}</p>
+      <div class="row wrap">${UPD && UPD.available ? `<button class="btn primary" data-act="update-open">Show the update</button>` : ''}<button class="btn" data-act="update-check">Check for updates</button></div>
+      <div class="chips" style="margin-top:14px"><label class="chip"><input type="checkbox" data-ch="set" data-path="settings.updateCheck" ${s.updateCheck ? 'checked' : ''}> Check automatically once a day</label></div>
+      <p class="help">The check asks github.com for the newest release of FocusQuest and sends none of your data. A new version is only installed when you click "Install update".</p>
+    </div>` : ''}
+
     <div class="card"><h2>Your data</h2>
       <p class="lead">${SERVED ? 'Everything is saved in the data folder next to Start-FocusQuest.cmd. A dated copy is kept for the last 14 days.' : 'Everything is saved in this browser. Clearing the browsing data of this browser deletes it, so save a backup file now and then.'}</p>
       <div class="row wrap"><button class="btn" data-act="export">Save a backup file</button><button class="btn" data-act="import-file">Restore from a backup file</button>${SERVED ? `<button class="btn quiet" data-act="quit">Stop the helper</button>` : ''}</div>
@@ -920,6 +928,68 @@ async function fbLoad() {
   } catch (e) { box.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
 }
 
+/* ------------------------------------------------------------------ updates (the helper asks GitHub and does the installing) */
+async function checkUpdate(force) {
+  if (!SERVED) return null;
+  UI.lastUpdCheck = Date.now();
+  try { UPD = await api('GET', '/api/update/check' + (force ? '?force=1' : '')); }
+  catch (e) { UPD = { ok: false, available: false, current: meta.version, latest: '', notes: '', message: e.message }; }
+  renderRailFoot();
+  const el = $('#upd-state'); if (el) el.innerHTML = updState();
+  return UPD;
+}
+function updState() {
+  const v = meta.version ? `You have version ${esc(meta.version)}.` : '';
+  if (!UPD) return `${v} Not checked yet.`;
+  if (!UPD.ok) return `${v} The check did not work. ${esc(UPD.message || '')}`;
+  if (UPD.available) return `${v} Version ${esc(UPD.latest)} is available.`;
+  return `${v} That is the newest one. Checked ${esc(relTime(new Date(UPD.checkedAt).getTime()))}.`;
+}
+/* release notes as plain headings, paragraphs and lists. The install instructions below the marker are left out. */
+function notesHtml(text) {
+  const lines = String(text || '').split('<!-- install -->')[0].replace(/\r/g, '').split('\n');
+  let h = '', list = false;
+  for (const raw of lines) {
+    const l = raw.trim(); let m;
+    if ((m = /^[-*]\s+(.*)$/.exec(l))) { if (!list) { h += '<ul>'; list = true; } h += `<li>${esc(m[1])}</li>`; continue; }
+    if (list) { h += '</ul>'; list = false; }
+    if (!l) continue;
+    h += (m = /^#{1,6}\s+(.*)$/.exec(l)) ? `<h3>${esc(m[1])}</h3>` : `<p>${esc(l)}</p>`;
+  }
+  return h + (list ? '</ul>' : '');
+}
+function openUpdate() {
+  if (!UPD || !UPD.available) return;
+  const d = UPD.publishedAt ? new Date(UPD.publishedAt) : null;
+  const when = d && !isNaN(d) ? ` Published ${d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}.` : '';
+  const notes = notesHtml(UPD.notes);
+  UI.updW = modal(`<h2>FocusQuest ${esc(UPD.latest)} is available</h2>
+    <p class="lead">You have version ${esc(UPD.current)}.${when}</p>
+    ${notes ? `<div class="rich notes">${notes}</div>` : ''}
+    <p class="help">Installing takes a few seconds. FocusQuest restarts by itself, and your to-dos, tickets and settings stay as they are.</p>
+    <div id="upd-msg"></div>
+    <div class="mfoot"><button class="btn" data-act="modal-close">Not now</button><button class="btn primary" data-act="update-apply">Install update</button></div>`);
+}
+async function applyUpdate(btn) {
+  const w = UI.updW, want = UPD && UPD.latest;
+  showErr('#upd-msg', '', w); busy(btn, true, 'Installing');
+  try { await flush(); await api('POST', '/api/update/apply'); }
+  catch (e) { busy(btn, false); showErr('#upd-msg', e.message, w); return; }
+  // the helper has stopped; the new version starts on the same address
+  $('.mfoot', w).innerHTML = `<span class="help"><span class="spin"></span>Restarting FocusQuest</span>`;
+  const t0 = Date.now();
+  while (Date.now() - t0 < 45000) {
+    await new Promise(r => setTimeout(r, 1000));
+    try {
+      const st = await api('GET', '/api/state');
+      if (st && st.version === want) { try { sessionStorage.setItem('fq-updated', want); } catch (e) { /* optional */ } location.reload(); return; }
+    } catch (e) { /* not back yet */ }
+  }
+  $('.mfoot', w).innerHTML = `<button class="btn" data-act="modal-close">Close</button>`;
+  showErr('#upd-msg', 'The update is installed, but FocusQuest did not come back by itself. Start it again from the Start menu or with Start-FocusQuest.cmd, then reload this page.', w);
+  helperDown = true; renderRailFoot();
+}
+
 /* ------------------------------------------------------------------ reminders */
 function fireReminder(it) {
   sound('remind');
@@ -951,6 +1021,7 @@ function checkReminders() {
 function tick() {
   checkReminders();
   if (UI.day !== today()) { UI.day = today(); renderPlayer(); refreshBoard(); }
+  if (SERVED && S.settings.updateCheck && !helperDown && Date.now() - (UI.lastUpdCheck || 0) > 6 * 3600000) checkUpdate(false);
   const min = +S.settings.refreshMin || 0;
   if (min > 0 && jiraReady() && !helperDown && !$('#modals').children.length && Date.now() - UI.lastRefreshAll >= min * 60000) refreshAll(true);
 }
@@ -1074,6 +1145,10 @@ const ACT = {
     save(); el.disabled = true; el.textContent = 'Added'; renderSettings();
     if (names.length > 12) toast(`${f.name} added. It has ${names.length} choices: use "Pick the choices from Jira" to keep only yours.`, { ttl: 8000 });
   },
+
+  'update-open'() { openUpdate(); },
+  'update-apply'(el) { applyUpdate(el); },
+  async 'update-check'(el) { busy(el, true, 'Checking'); await checkUpdate(true); if (UI.view === 'settings') renderSettings(); },
 
   async 'jira-save'(el) {
     const url = $('#j-url').value.trim().replace(/\/+$/, ''), tok = $('#j-tok').value.trim();
@@ -1249,6 +1324,11 @@ async function start() {
   const q = $('#q'); if (q) q.focus();
   const t = today(), open = openItems(), over = open.filter(i => i.due && i.due < t).length, due = open.filter(i => i.due === t).length;
   if (over || due) toast(`${due ? `${due} due today` : ''}${due && over ? ', ' : ''}${over ? `${over} overdue` : ''}. Pick one and start small.`, { ttl: 6000 });
+  let updated = null; try { updated = sessionStorage.getItem('fq-updated'); sessionStorage.removeItem('fq-updated'); } catch (e) { /* optional */ }
+  if (updated) toast(`FocusQuest ${updated} is installed.`, { ttl: 6000 });
+  // a quiet look for a newer version: once after the start, then about once a day (the helper remembers the answer)
+  UI.lastUpdCheck = Date.now();
+  if (SERVED && S.settings.updateCheck) setTimeout(() => checkUpdate(false), 3000);
   // reminders that came up while FocusQuest was closed fire now, then every 20 seconds
   setTimeout(checkReminders, 1500);
   setInterval(tick, 20000);

@@ -1,14 +1,15 @@
 name: Release
 
+# Every push is built and tested. Only pushes to main publish a release and the browser version.
 on:
   push:
-    branches: [main]
+    branches: [main, 'claude/**']
 
 permissions:
   contents: read
 
 concurrency:
-  group: release
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -76,6 +77,7 @@ jobs:
       run:
         shell: powershell
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: release
@@ -170,10 +172,18 @@ jobs:
           $p.Kill()
           Write-Host 'Helper OK'
 
+      # Routes, update check and update install of the installed helper, against a local stand-in for GitHub.
+      - name: Helper routes and in-app update
+        run: |
+          $target = Join-Path $env:LOCALAPPDATA 'FocusQuest'
+          & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File dev\test-helper.ps1 -Install $target
+          if ($LASTEXITCODE -ne 0) { throw 'helper tests failed' }
+
   # Publishes the browser version. Skipped until GitHub Pages is switched on
   # (repository Settings > Pages > Source: GitHub Actions).
   pages:
     needs: build
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       pages: write
@@ -198,34 +208,53 @@ jobs:
 
   release:
     needs: [build, installer-test]
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v4
         with:
           name: release
           path: dist
+
+      # The part above the marker is what the app shows as "what's new" before an update.
+      - name: Release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          prev=$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)
+          if [ -n "$prev" ] && git rev-parse -q --verify "refs/tags/$prev" > /dev/null; then range="$prev..HEAD"; else range="-5"; fi
+          {
+            echo "## What's new"
+            git log --no-merges --format='- %s' $range
+            echo
+            echo '<!-- install -->'
+            echo '## Update'
+            echo 'In FocusQuest, click "Version '"$VERSION"' is available" at the bottom left, then "Install update". Your data is kept.'
+            echo
+            echo 'If your copy is older than the in-app update, update by hand once: close the helper window and follow the install steps with the new zip file.'
+            echo
+            echo '## Install'
+            echo "1. Download \`FocusQuest-$VERSION.zip\`."
+            echo '2. Right-click the zip file, choose Properties, tick "Unblock" ("Zulassen") and click OK.'
+            echo '3. Extract it and double-click `Install-FocusQuest.cmd`. No admin rights needed.'
+            echo
+            echo 'If the PC only runs signed PowerShell scripts even after unblocking, double-click `app.html` from the zip (to-dos only, no Jira).'
+          } > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
 
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build.outputs.version }}
         run: |
-          cat > notes.md <<'NOTES'
-          **Install**
-          1. Download `FocusQuest-VERSION.zip`.
-          2. Right-click the zip file, choose Properties, tick "Unblock" ("Zulassen") and click OK.
-          3. Extract it and double-click `Install-FocusQuest.cmd`. No admin rights needed.
-
-          **Update:** close the helper window and do the same again. Your data in the `data` folder is kept.
-
-          If the PC only runs signed PowerShell scripts even after unblocking, double-click `app.html` from the zip (to-dos only, no Jira).
-          NOTES
-          sed -i "s/^ *//; s/VERSION/$VERSION/" notes.md
           gh release create "v$VERSION" dist/* \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "FocusQuest $VERSION" \
-            --notes-file notes.md \
-            --generate-notes
+            --notes-file "$RUNNER_TEMP/notes.md"

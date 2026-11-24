@@ -24,14 +24,47 @@ $appFile  = Join-Path $root 'app.html'
 $dataDir  = Join-Path $root 'data'
 $dataFile = Join-Path $dataDir 'focusquest-data.json'
 $cfgFile  = Join-Path $dataDir 'helper-config.json'
+$versionFile = Join-Path $root 'version.txt'
 $utf8     = New-Object System.Text.UTF8Encoding($false)
 $script:lastBackupDay = ''
 $script:running = $true
+$script:restart = $false
+$script:update = $null
+
+# Updates come from the releases of this GitHub repository and from nowhere else.
+# This is a constant on purpose: neither the page nor the data file can change it.
+$updateRepo  = 'Infpowertower/focusquest'
+$updateApi   = "https://api.github.com/repos/$updateRepo/releases/latest"
+$updateFrom  = "https://github.com/$updateRepo/releases/download/"
+$updateFiles = @('app.html', 'server.ps1', 'Start-FocusQuest.cmd', 'README.txt', 'LICENSE.txt', 'version.txt')
+$updateNeeds = @('app.html', 'server.ps1', 'Start-FocusQuest.cmd', 'version.txt')
+# For the automated tests only: a stand-in for GitHub on this PC.
+$updateTest = $false
+if ([string]$env:FOCUSQUEST_UPDATE_API -match '^http://localhost:\d+/') {
+    $updateApi = [string]$env:FOCUSQUEST_UPDATE_API
+    $updateTest = $true
+}
+
+function ConvertTo-Ver([string]$s) {
+    $s = $s.Trim()
+    if ($s.StartsWith('v')) { $s = $s.Substring(1) }
+    if ($s -notmatch '^\d+(\.\d+){1,3}$') { return $null }
+    return [version]$s
+}
+
+# A copy without version.txt is the first version that was handed out as a plain zip file.
+$version = '1.0.0'
+if (Test-Path -LiteralPath $versionFile) {
+    $v = ConvertTo-Ver ([System.IO.File]::ReadAllText($versionFile))
+    if ($null -ne $v) { $version = $v.ToString() }
+}
 
 if (-not (Test-Path -LiteralPath $appFile)) { throw "app.html is missing. It must be in the same folder as server.ps1 ($root)." }
 if (-not (Test-Path -LiteralPath $dataDir)) { New-Item -ItemType Directory -Path $dataDir | Out-Null }
 
 Add-Type -AssemblyName System.Net.Http
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
 try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 } catch { }
@@ -43,6 +76,7 @@ $cfg = @{
     jiraBaseUrl    = ''
     jiraToken      = ''
     useSystemProxy = $true
+    updateCache    = ''
 }
 
 if (Test-Path -LiteralPath $cfgFile) {
@@ -64,7 +98,8 @@ if ([string]::IsNullOrEmpty([string]$cfg.secret)) {
     $cfg.secret = [Guid]::NewGuid().ToString('N') + [Guid]::NewGuid().ToString('N')
     Save-Config
 }
-if ($Port -gt 0) { $cfg.port = $Port }
+$basePort = [int]$cfg.port
+if ($Port -gt 0) { $basePort = $Port }
 
 # The Jira token is stored encrypted with Windows DPAPI: only your Windows user on this PC can read it.
 function Protect-Token([string]$plain) {
@@ -91,6 +126,19 @@ $handler.UseProxy = [bool]$cfg.useSystemProxy
 $handler.AutomaticDecompression = [System.Net.DecompressionMethods]::GZip -bor [System.Net.DecompressionMethods]::Deflate
 $client = New-Object System.Net.Http.HttpClient($handler)
 $client.Timeout = [TimeSpan]::FromSeconds(60)
+
+# ---------------------------------------------------------------- http client for GitHub (update check and download)
+# A separate client: it follows redirects and never carries the Jira token.
+$ghHandler = New-Object System.Net.Http.HttpClientHandler
+$ghHandler.AllowAutoRedirect = $true
+$ghHandler.UseCookies = $false
+$ghHandler.UseProxy = [bool]$cfg.useSystemProxy
+# A company proxy that asks for the Windows sign-in gets it, as it does from the browser.
+try { $ghHandler.DefaultProxyCredentials = [System.Net.CredentialCache]::DefaultCredentials } catch { }
+$ghHandler.AutomaticDecompression = [System.Net.DecompressionMethods]::GZip -bor [System.Net.DecompressionMethods]::Deflate
+$ghClient = New-Object System.Net.Http.HttpClient($ghHandler)
+$ghClient.Timeout = [TimeSpan]::FromSeconds(60)
+$ghClient.DefaultRequestHeaders.TryAddWithoutValidation('User-Agent', "FocusQuest/$version") | Out-Null
 
 # ---------------------------------------------------------------- response helpers
 function Send-Bytes($ctx, [int]$status, [string]$contentType, [byte[]]$bytes) {
@@ -146,6 +194,228 @@ function Save-Data([string]$json) {
     [System.IO.File]::WriteAllText($tmp, $json, $utf8)
     if (Test-Path -LiteralPath $dataFile) { [System.IO.File]::Delete($dataFile) }
     [System.IO.File]::Move($tmp, $dataFile)
+}
+
+# ---------------------------------------------------------------- updates
+function New-UpdateInfo {
+    return @{ at = [DateTime]::UtcNow; ok = $false; latest = ''; notes = ''; publishedAt = ''; zipUrl = ''; shaUrl = ''; message = '' }
+}
+
+# The last successful check is remembered across restarts, so GitHub is asked once a day at most.
+if (-not [string]::IsNullOrEmpty([string]$cfg.updateCache)) {
+    try {
+        $c = ([string]$cfg.updateCache) | ConvertFrom-Json
+        $u = New-UpdateInfo
+        $u.at = [DateTime]::Parse([string]$c.at, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
+        $u.ok = $true
+        $u.latest = [string]$c.latest
+        $u.notes = [string]$c.notes
+        $u.publishedAt = [string]$c.publishedAt
+        if ($u.latest -eq '' -or $null -ne (ConvertTo-Ver $u.latest)) { $script:update = $u }
+    } catch {
+        $script:update = $null
+    }
+}
+
+# Asks GitHub for the newest release (GitHub leaves out drafts and pre-releases here).
+function Request-Release {
+    $info = New-UpdateInfo
+    try {
+        $msg = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Get, $updateApi)
+        $msg.Headers.TryAddWithoutValidation('Accept', 'application/vnd.github+json') | Out-Null
+        $resp = $ghClient.SendAsync($msg).GetAwaiter().GetResult()
+        $status = [int]$resp.StatusCode
+        $text = $resp.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+        $resp.Dispose()
+        if ($status -eq 200) {
+            $rel = $text | ConvertFrom-Json
+            $ver = ConvertTo-Ver ([string]$rel.tag_name)
+            if ($null -eq $ver -or $rel.draft -eq $true -or $rel.prerelease -eq $true) {
+                $info.message = 'The newest release on GitHub is not a regular version.'
+            } else {
+                $info.latest = $ver.ToString()
+                $notes = [string]$rel.body
+                if ($notes.Length -gt 20000) { $notes = $notes.Substring(0, 20000) }
+                $info.notes = $notes
+                $info.publishedAt = [string]$rel.published_at
+                $zipName = "FocusQuest-$($info.latest).zip"
+                foreach ($a in @($rel.assets)) {
+                    if ([string]$a.name -eq $zipName) { $info.zipUrl = [string]$a.browser_download_url }
+                    if ([string]$a.name -eq "$zipName.sha256") { $info.shaUrl = [string]$a.browser_download_url }
+                }
+                $info.ok = $true
+            }
+        } elseif ($status -eq 404) {
+            $info.ok = $true   # no release published yet
+        } elseif ($status -eq 403 -or $status -eq 429) {
+            $info.message = 'GitHub is not answering update checks from this network right now. Try again later.'
+        } else {
+            $info.message = "GitHub answered the update check with status $status."
+        }
+    } catch {
+        $info.message = 'GitHub could not be reached: ' + $_.Exception.GetBaseException().Message
+    }
+    $script:update = $info
+    if ($info.ok) {
+        try {
+            $cfg.updateCache = (@{ at = $info.at.ToString('o'); latest = $info.latest; notes = $info.notes; publishedAt = $info.publishedAt } | ConvertTo-Json -Compress)
+            Save-Config
+        } catch { }
+    }
+    return $info
+}
+
+function Get-UpdateInfo([bool]$force) {
+    if (-not $force -and $null -ne $script:update) {
+        $age = ([DateTime]::UtcNow - $script:update.at).TotalHours
+        # a good answer is kept for a day, a failed check is repeated after an hour at the earliest
+        if ($age -ge 0 -and (($script:update.ok -and $age -lt 24) -or (-not $script:update.ok -and $age -lt 1))) { return $script:update }
+    }
+    return (Request-Release)
+}
+
+function Get-UpdateView($info) {
+    $available = $false
+    if ($info.ok -and $info.latest -ne '') {
+        $new = ConvertTo-Ver $info.latest
+        $cur = ConvertTo-Ver $version
+        if ($null -ne $new -and $null -ne $cur) { $available = ($new -gt $cur) }
+    }
+    return @{
+        current     = $version
+        latest      = [string]$info.latest
+        available   = $available
+        notes       = [string]$info.notes
+        publishedAt = [string]$info.publishedAt
+        ok          = [bool]$info.ok
+        message     = [string]$info.message
+        checkedAt   = $info.at.ToString('o')
+    }
+}
+
+function Test-UpdateUrl([string]$url) {
+    if ($updateTest) { return ($url -match '^http://localhost:\d+/') }
+    return $url.StartsWith($updateFrom, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Save-Download([string]$url, [string]$file, [int]$maxBytes) {
+    $msg = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Get, $url)
+    $msg.Headers.TryAddWithoutValidation('Accept', 'application/octet-stream') | Out-Null
+    $resp = $ghClient.SendAsync($msg, [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
+    try {
+        if ([int]$resp.StatusCode -ne 200) { throw "The download failed with status $([int]$resp.StatusCode)." }
+        # GitHub redirects downloads to its file servers. Wherever it ends, it has to be https.
+        if (-not $updateTest -and $resp.RequestMessage.RequestUri.Scheme -ne 'https') { throw 'The download was redirected to an address without https.' }
+        $src = $resp.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
+        $dst = [System.IO.File]::Create($file)
+        try {
+            $buf = New-Object byte[] 65536
+            $total = 0
+            while ($true) {
+                $n = $src.Read($buf, 0, $buf.Length)
+                if ($n -le 0) { break }
+                $total += $n
+                if ($total -gt $maxBytes) { throw 'The download is larger than expected.' }
+                $dst.Write($buf, 0, $n)
+            }
+        } finally {
+            $dst.Close()
+            $src.Close()
+        }
+    } finally {
+        $resp.Dispose()
+    }
+}
+
+# Downloads the release, checks it and replaces the program files. The data folder is never touched.
+# Throws with a message for the user when anything is wrong; in that case the installed version is unchanged.
+function Install-Update($info) {
+    if ([string]::IsNullOrEmpty($info.zipUrl) -or [string]::IsNullOrEmpty($info.shaUrl)) {
+        throw 'The release on GitHub has no download yet. Try again in a few minutes.'
+    }
+    if (-not (Test-UpdateUrl $info.zipUrl) -or -not (Test-UpdateUrl $info.shaUrl)) {
+        throw 'The release points to an unexpected download address.'
+    }
+    $upd = Join-Path $dataDir 'update'
+    $staged = Join-Path $upd 'staged'
+    $prev = Join-Path $upd 'previous'
+    $zip = Join-Path $upd 'update.zip'
+    $sha = Join-Path $upd 'update.zip.sha256'
+    if (-not (Test-Path -LiteralPath $upd)) { New-Item -ItemType Directory -Path $upd | Out-Null }
+    if (Test-Path -LiteralPath $staged) { Remove-Item -LiteralPath $staged -Recurse -Force }
+    New-Item -ItemType Directory -Path $staged | Out-Null
+
+    Save-Download $info.zipUrl $zip 20971520
+    Save-Download $info.shaUrl $sha 4096
+    $want = (([System.IO.File]::ReadAllText($sha)).Trim() -split '\s+')[0]
+    if ($want -notmatch '^[0-9a-fA-F]{64}$') { throw 'The checksum file of the release cannot be read.' }
+    $have = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+    if ($have -ne $want) { throw 'The download does not match its checksum.' }
+
+    # Only these file names are taken out of the archive, each to a fixed place.
+    # Whatever else the archive contains, under whatever path, is never written to disk.
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+    try {
+        foreach ($name in $updateFiles) {
+            $entry = $archive.GetEntry("FocusQuest/$name")
+            if ($null -eq $entry) { continue }
+            if ($entry.Length -gt 10485760) { throw "$name in the download is larger than expected." }
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, (Join-Path $staged $name), $true)
+        }
+    } finally {
+        $archive.Dispose()
+    }
+
+    foreach ($name in $updateNeeds) {
+        if (-not (Test-Path -LiteralPath (Join-Path $staged $name))) { throw "The download is incomplete: $name is missing." }
+    }
+    $newVer = ConvertTo-Ver ([System.IO.File]::ReadAllText((Join-Path $staged 'version.txt')))
+    if ($null -eq $newVer -or $newVer.ToString() -ne $info.latest) { throw 'The download is not the version GitHub announced.' }
+    if (-not ([System.IO.File]::ReadAllText((Join-Path $staged 'app.html'), $utf8)).Contains('__FQ_TOKEN__')) { throw 'app.html in the download is not a FocusQuest page.' }
+    $tokens = $null
+    $syntax = $null
+    [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $staged 'server.ps1'), [ref]$tokens, [ref]$syntax) | Out-Null
+    if ($null -ne $syntax -and $syntax.Count -gt 0) { throw 'server.ps1 in the download has syntax errors.' }
+
+    # A copy of the data as it was before this update. The last five are kept.
+    if (Test-Path -LiteralPath $dataFile) {
+        $bdir = Join-Path $dataDir 'backups'
+        if (-not (Test-Path -LiteralPath $bdir)) { New-Item -ItemType Directory -Path $bdir | Out-Null }
+        [System.IO.File]::Copy($dataFile, (Join-Path $bdir "pre-update-$version.json"), $true)
+        $old = Get-ChildItem -LiteralPath $bdir -Filter 'pre-update-*.json' | Sort-Object LastWriteTime -Descending | Select-Object -Skip 5
+        foreach ($f in $old) { try { [System.IO.File]::Delete($f.FullName) } catch { } }
+    }
+
+    # The program files as they are now, to go back to if the copy below fails (or by hand later).
+    if (Test-Path -LiteralPath $prev) { Remove-Item -LiteralPath $prev -Recurse -Force }
+    New-Item -ItemType Directory -Path $prev | Out-Null
+    $had = @()
+    foreach ($name in $updateFiles) {
+        $cur = Join-Path $root $name
+        if (Test-Path -LiteralPath $cur) {
+            [System.IO.File]::Copy($cur, (Join-Path $prev $name), $true)
+            $had += $name
+        }
+    }
+
+    try {
+        foreach ($name in $updateFiles) {
+            $new = Join-Path $staged $name
+            if (Test-Path -LiteralPath $new) { [System.IO.File]::Copy($new, (Join-Path $root $name), $true) }
+        }
+    } catch {
+        $why = $_.Exception.GetBaseException().Message
+        foreach ($name in $had) {
+            try { [System.IO.File]::Copy((Join-Path $prev $name), (Join-Path $root $name), $true) } catch { }
+        }
+        throw "The new files could not be written ($why) The previous version was put back."
+    }
+
+    try {
+        Remove-Item -LiteralPath $staged -Recurse -Force
+        Remove-Item -LiteralPath $zip -Force
+        Remove-Item -LiteralPath $sha -Force
+    } catch { }
 }
 
 # ---------------------------------------------------------------- Jira relay
@@ -224,6 +494,7 @@ function Invoke-Request($ctx) {
 
     if ($path -eq '/api/state' -and $method -eq 'GET') {
         Send-Json $ctx 200 @{
+            version = $version
             jira = @{
                 baseUrl  = [string]$cfg.jiraBaseUrl
                 hasToken = (-not [string]::IsNullOrEmpty([string]$cfg.jiraToken))
@@ -265,6 +536,33 @@ function Invoke-Request($ctx) {
         Send-Text $ctx 200 'application/json; charset=utf-8' '{"ok":true}'
         return
     }
+    if ($path -eq '/api/update/check' -and $method -eq 'GET') {
+        $info = Get-UpdateInfo ($req.Url.Query -match 'force=1')
+        Send-Json $ctx 200 (Get-UpdateView $info)
+        return
+    }
+    if ($path -eq '/api/update/apply' -and $method -eq 'POST') {
+        # What gets installed is decided here from GitHub's answer, never by the request.
+        $info = Request-Release
+        if (-not $info.ok) {
+            Send-Error $ctx 502 $info.message
+            return
+        }
+        if (-not (Get-UpdateView $info).available) {
+            Send-Error $ctx 409 'FocusQuest is already up to date.'
+            return
+        }
+        try {
+            Install-Update $info | Out-Null
+        } catch {
+            Send-Error $ctx 500 ('The update was not installed. ' + $_.Exception.GetBaseException().Message)
+            return
+        }
+        Send-Json $ctx 200 @{ ok = $true; restarting = $true; version = $info.latest }
+        $script:restart = $true
+        $script:running = $false
+        return
+    }
     if ($path -eq '/api/quit' -and $method -eq 'POST') {
         Send-Text $ctx 200 'application/json; charset=utf-8' '{"ok":true}'
         $script:running = $false
@@ -291,9 +589,9 @@ function Test-Existing([int]$p) {
 }
 
 $listener = $null
-$listenPort = [int]$cfg.port
+$listenPort = $basePort
 for ($i = 0; $i -lt 10; $i++) {
-    $candidate = [int]$cfg.port + $i
+    $candidate = $basePort + $i
     if (Test-Existing $candidate) {
         Write-Host "FocusQuest is already running on http://localhost:$candidate/"
         if (-not $NoBrowser) { Start-Process "http://localhost:$candidate/" }
@@ -311,11 +609,11 @@ for ($i = 0; $i -lt 10; $i++) {
         try { $l.Close() } catch { }
     }
 }
-if ($null -eq $listener) { throw "No free port found between $($cfg.port) and $([int]$cfg.port + 9)." }
+if ($null -eq $listener) { throw "No free port found between $basePort and $($basePort + 9)." }
 
 try { $Host.UI.RawUI.WindowTitle = 'FocusQuest helper' } catch { }
 Write-Host ''
-Write-Host "  FocusQuest is running:  http://localhost:$listenPort/" -ForegroundColor Green
+Write-Host "  FocusQuest $version is running:  http://localhost:$listenPort/" -ForegroundColor Green
 Write-Host ''
 Write-Host '  Keep this window open (minimized) while you use FocusQuest.'
 Write-Host '  Close it to stop FocusQuest. Your data is in the "data" folder.'
@@ -339,4 +637,14 @@ try {
 } finally {
     try { $listener.Stop(); $listener.Close() } catch { }
     try { $client.Dispose() } catch { }
+    try { $ghClient.Dispose() } catch { }
+}
+
+# After an update: the listener above is closed, now the new version takes over the same address.
+if ($script:restart) {
+    Write-Host ''
+    Write-Host '  Update installed. Starting the new version ...'
+    $exe = (Get-Process -Id $PID).Path
+    $self = $MyInvocation.MyCommand.Path
+    Start-Process -FilePath $exe -WindowStyle Minimized -ArgumentList "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$self`" -NoBrowser -Port $listenPort"
 }

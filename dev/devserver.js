@@ -3,6 +3,8 @@ const http = require('http'), fs = require('fs'), path = require('path');
 const PORT = +process.env.FQ_PORT || 8765, JPORT = +process.env.FQ_JIRA_PORT || 8799, SECRET = 'devsecret', TOKEN = 'testtoken';
 const root = path.join(__dirname, '..'), dataFile = process.env.FQ_DATA || path.join(__dirname, 'data.json');
 let cfg = { baseUrl: '', token: '' };
+let version = '1.0.0';
+const RELEASE = { latest: '1.1.0', publishedAt: '2026-11-20T10:00:00Z', notes: "## What's new\n- Ticket forms for several projects\n- Statistics in the sidebar\n\n<!-- install -->\n## Install\nDownload the zip file." };
 const body = req => new Promise(r => { let b = ''; req.on('data', c => b += c); req.on('end', () => r(b)); });
 const send = (res, s, o, ct) => { const t = typeof o === 'string' ? o : JSON.stringify(o); res.writeHead(s, { 'Content-Type': ct || 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(s === 204 ? undefined : t); };
 
@@ -13,7 +15,13 @@ http.createServer(async (req, res) => {
   if (p === '/api/ping') return send(res, 200, { app: 'focusquest' });
   if (p === '/favicon.ico') return send(res, 204, '');
   if (req.headers['x-fq-token'] !== SECRET) return send(res, 403, { errorMessages: ['Forbidden.'] });
-  if (p === '/api/state') return send(res, 200, { jira: { baseUrl: cfg.baseUrl, hasToken: !!cfg.token } });
+  if (p === '/api/state') return send(res, 200, { version, jira: { baseUrl: cfg.baseUrl, hasToken: !!cfg.token } });
+  if (p === '/api/update/check') return send(res, 200, Object.assign({ current: version, available: version !== RELEASE.latest, ok: true, message: '', checkedAt: new Date().toISOString() }, RELEASE));
+  if (p === '/api/update/apply' && req.method === 'POST') {
+    if (version === RELEASE.latest) return send(res, 409, { errorMessages: ['FocusQuest is already up to date.'] });
+    version = RELEASE.latest;   // the real helper replaces its files and restarts here
+    return send(res, 200, { ok: true, restarting: true, version });
+  }
   if (p === '/api/data' && req.method === 'GET') return send(res, 200, fs.existsSync(dataFile) ? fs.readFileSync(dataFile, 'utf8') : 'null');
   if (p === '/api/data' && req.method === 'PUT') { fs.writeFileSync(dataFile, await body(req)); return send(res, 200, { ok: true }); }
   if (p === '/api/jira-config') { const o = JSON.parse(await body(req)); if (o.baseUrl != null) cfg.baseUrl = o.baseUrl; if (o.token != null) cfg.token = o.token; return send(res, 200, { ok: true }); }
