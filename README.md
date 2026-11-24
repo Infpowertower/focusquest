@@ -17,9 +17,9 @@ FocusQuest asks GitHub once a day for the newest release (this can be switched o
 
 The checksum catches a damaged download. It does not protect against a compromised GitHub account, because zip and checksum come from the same place.
 
-## Browser version
+## Without the helper
 
-If your PC only runs signed PowerShell scripts (execution policy `AllSigned`), or you only need the to-dos, open <https://infpowertower.github.io/focusquest/> and install it from the browser menu (Edge: **Apps > Install this site as an app**). That gives a Start menu entry, works offline and updates itself, with no scripts involved. Jira is switched off in this version, because a web page cannot call Jira Data Center without the helper, and the data is kept in the browser rather than in a file.
+If your PC only runs signed PowerShell scripts (execution policy `AllSigned`), or you only need the to-dos, double-click `app.html` from the zip. Jira is switched off in this mode, because a web page cannot call Jira Data Center without the helper, and the data is kept in the browser rather than in a file. The same page can be published as an installable, offline-capable website: switch on GitHub Pages with source "GitHub Actions" and the workflow deploys it.
 
 ## How it works
 
