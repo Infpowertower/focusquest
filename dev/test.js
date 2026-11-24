@@ -12,7 +12,7 @@ const PORT = +process.env.FQ_PORT || 8765, JPORT = +process.env.FQ_JIRA_PORT || 
   // screenshots only when FQ_SHOTS names a folder
   const shot = n => process.env.FQ_SHOTS ? page.screenshot({ path: `${process.env.FQ_SHOTS}/shot-${n}.png` }) : null;
   let failed = 0;
-  const step = async (name, fn) => { try { await fn(); console.log('ok  ', name); } catch (e) { failed++; console.log('FAIL', name, '\n     ', e.message.split('\n')[0]); await shot('fail-' + name.replace(/\W+/g, '_')); } };
+  const step = async (name, fn) => { try { await fn(); console.log('ok  ', name); } catch (e) { failed++; console.log('FAIL', name, '\n     ', e.message.split('\n')[0], ((e.stack || '').match(/test\.js:\d+/) || [''])[0]); await shot('fail-' + name.replace(/\W+/g, '_')); } };
   const xp = () => page.evaluate(() => S.game.xp);
 
   await page.goto(`http://localhost:${PORT}/`);
@@ -149,6 +149,35 @@ const PORT = +process.env.FQ_PORT || 8765, JPORT = +process.env.FQ_JIRA_PORT || 
     await page.waitForSelector('.cmt');
     assert.equal(await xp(), before + 20);
     assert.match(await page.textContent('.cmt'), /Alex Brandt.*Certificate ordered/s);
+    // after a comment FocusQuest asks for the time spent
+    await page.waitForSelector('#at-val');
+    assert.match(await page.textContent('.overlay .modal'), /Time on OPS-103/);
+    await page.click('[data-act=at-pick][data-min="30"]');
+    await page.waitForSelector('.toast:has-text("30 min booked on OPS-103")');
+    assert.deepEqual(await page.evaluate(() => S.time.log.map(e => [e.key, e.min, e.day === today(), e.wl])), [['OPS-103', 30, true, null]]);
+  });
+  await step('time on a ticket: quick add, timer, own amount, work log in Jira', async () => {
+    await page.click('[data-act=tt-add][data-min="15"]');
+    assert.match(await page.textContent('#tt-sect'), /45 min booked/);
+    await page.click('[data-act=tt-start]');
+    await page.waitForSelector('.conn.tkt:has-text("OPS-103")');
+    await page.evaluate(() => { S.time.ticket.start -= 20 * 60000; });
+    await page.click('[data-act=tt-stop]');
+    await page.waitForSelector('.toast:has-text("20 min booked on OPS-103")');
+    assert.match(await page.textContent('#tt-sect'), /1 h 5 min booked/);
+    assert.equal(await page.locator('.conn.tkt').count(), 0);
+    await page.click('[data-act=tt-other]');
+    await page.fill('#at-val', 'soon'); await page.click('[data-act=at-save]');
+    assert.match(await page.textContent('#at-err'), /Write the time like/);
+    await page.fill('#at-val', '1:30'); await page.fill('#at-note', 'Checked the chain');
+    await page.check('#at-jira');
+    await page.press('#at-val', 'Enter');
+    await page.waitForFunction(() => S.time.log.some(e => e.min === 90 && e.wl));
+    const wl = await page.evaluate(() => jira('GET', 'rest/api/2/issue/OPS-103/worklog'));
+    assert.equal(wl.worklogs.length, 1, 'only the entry that asked for it went to Jira');
+    assert.equal(wl.worklogs[0].timeSpentSeconds, 5400); assert.equal(wl.worklogs[0].comment, 'Checked the chain');
+    assert.match(wl.worklogs[0].started, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.000[+-]\d{4}$/);
+    assert.equal(await page.evaluate(() => ticketMinutes('OPS-103')), 155);
   });
   await step('transition to in progress', async () => {
     const before = await xp();
@@ -168,6 +197,8 @@ const PORT = +process.env.FQ_PORT || 8765, JPORT = +process.env.FQ_JIRA_PORT || 
     await page.waitForSelector('.cheer');
     await page.waitForTimeout(400);
     await shot('07-celebration');
+    await page.waitForSelector('#at-val');                  // the closing comment counts as a comment too
+    await page.click('.overlay [data-act=modal-close]');
     assert.equal(await xp(), before + 20 + 120);
     assert.ok(await page.evaluate(() => ticketByKey('OPS-103').done));
     await page.waitForTimeout(3000);
@@ -220,6 +251,77 @@ const PORT = +process.env.FQ_PORT || 8765, JPORT = +process.env.FQ_JIRA_PORT || 
     assert.deepEqual(st, { created: 6, closed: 2, comments: 2 });
     assert.equal(await page.textContent('#p-comments'), '2');
   });
+  await step('sub-tickets: epic cannot be closed, its tickets open from the list', async () => {
+    await page.click('[data-act=close-drawer]');
+    await page.click('[data-act=import]');
+    await page.fill('#imp-keys', 'OPS-110'); await page.click('[data-act=imp-keys]');
+    await page.waitForFunction(() => !!ticketByKey('OPS-110'));
+    await page.click('.overlay [data-act=modal-close]');
+    const row = '.item:has-text("warehouse scanners")';
+    assert.match(await page.textContent(row), /1 of 2 sub-tickets done/);
+    assert.ok(await page.evaluate(() => nowItem().jira ? nowItem().jira.key !== 'OPS-110' : true), 'an epic with open tickets is not suggested as next');
+    await page.click(row + ' .check.hold');
+    await page.waitForSelector('.toast:has-text("OPS-110 has 1 open sub-ticket")');
+    assert.equal(await page.locator('[data-trf]').count(), 0, 'no close dialog');
+    await page.click(row + ' .ibody');
+    await page.waitForSelector('#tr-area .help:has-text("can be closed when they are done")');
+    assert.equal(await page.locator('#tr-area button:has-text("Done")').count(), 0);
+    assert.match(await page.textContent('#kids-sect'), /Tickets in this epic\s*1 of 2 done.*OPS-111.*not on my board.*OPS-112/s);
+    await shot('14-epic');
+    await page.click('.kid:has-text("OPS-111")');
+    await page.waitForSelector('#drawer a.key:has-text("OPS-111")');
+    assert.match(await page.textContent('#drawer'), /Part of\s*OPS-110 Roll out/);
+    await page.waitForSelector('#tr-area .btn');
+    await page.click('#tr-area button:has-text("Done")');
+    await page.click('[data-act=do-transition]');
+    await page.waitForSelector('.toast:has-text("All sub-tickets of OPS-110 are done")');
+    assert.equal(await page.evaluate(() => holdsOpen(ticketByKey('OPS-110'))), false);
+    await page.waitForTimeout(3000);
+  });
+  await step('sub-tickets: create a sub-task and a ticket in an epic from the app', async () => {
+    await page.click('[data-act=close-drawer]');
+    await page.click('.item:has-text("mailbox quota") .ibody');
+    await page.waitForSelector('#kids-sect .kid:has-text("OPS-106")');
+    await page.click('[data-act=new-subtask]');
+    await page.waitForSelector('#tf-parent');
+    assert.equal(await page.inputValue('#tf-parent'), 'OPS-102');
+    assert.match(await page.textContent('#tf-where'), /Creates a Sub-task in OPS/);
+    assert.ok(await page.evaluate(() => S.ticketCfg.forms.some(f => f.project === 'OPS' && f.type === 'Sub-task' && f.subtask)), 'a sub-task form was added');
+    await page.fill('#tf-summary', 'Check the quota report');
+    await page.click('[data-act=tf-create]');
+    await page.waitForSelector('#drawer h2:has-text("Check the quota report")');
+    assert.match(await page.textContent('#drawer'), /Part of\s*OPS-102 Raise mailbox quota/);
+    await page.waitForFunction(() => kids(ticketByKey('OPS-102').jira).length === 2);
+    // "only ask for Change Requests and their sub-tasks"
+    const ask = await page.evaluate(() => {
+      const sub = S.items.find(i => i.jira && i.jira.summary === 'Check the quota report'), cr = ticketByKey('OPS-102'), task = ticketByKey('OPS-103');
+      S.settings.timeAskTypes = ['change request'];
+      const a = [asksTime(cr), asksTime(sub), asksTime(task)];
+      S.settings.timeAskSubs = false; a.push(asksTime(sub));
+      S.settings.timeAsk = false; a.push(asksTime(cr));
+      S.settings.timeAskTypes = []; S.settings.timeAskSubs = true; S.settings.timeAsk = true; a.push(asksTime(task));
+      return a;
+    });
+    assert.deepEqual(ask, [true, true, false, false, false, true]);
+    // a ticket inside the epic needs the "Epic Link" field in the form
+    await page.click('[data-act=close-drawer]');
+    await page.click('.item:has-text("warehouse scanners") .ibody');
+    await page.click('[data-act=new-in-epic]');
+    await page.waitForSelector('#tf-summary');
+    assert.match(await page.textContent('.overlay .modal'), /This form has no "Epic Link" field/);
+    await page.click('.overlay [data-act=modal-close]');
+    await page.evaluate(() => { S.ticketCfg.forms[0].fields.push({ uid: 'f_epic', label: 'Epic Link', fieldId: 'customfield_10100', kind: 'text', values: [], required: false, def: '' }); save(); });
+    await page.click('[data-act=new-in-epic]');
+    await page.waitForSelector('#tf-summary');
+    assert.match(await page.textContent('.overlay .modal'), /It is added to the epic OPS-110/);
+    assert.equal(await page.inputValue('[data-f="f_epic"]'), 'OPS-110');
+    await page.fill('#tf-summary', 'Label the charging stations');
+    await page.check('.modal label.chip:has-text("Dispatch") input');
+    await page.click('[data-act=tf-create]');
+    await page.waitForSelector('#drawer h2:has-text("Label the charging stations")');
+    await page.waitForFunction(() => kids(ticketByKey('OPS-110').jira).length === 3 && holdsOpen(ticketByKey('OPS-110')));
+    await page.waitForFunction(() => /Part of\s*OPS-110/.test(document.querySelector('#drawer').textContent));
+  });
   await step('refresh shows activity by others', async () => {
     await page.click('[data-act=close-drawer]');
     await fetch(`http://localhost:${JPORT + 1}/`);
@@ -234,6 +336,76 @@ const PORT = +process.env.FQ_PORT || 8765, JPORT = +process.env.FQ_JIRA_PORT || 
     assert.ok(require('fs').existsSync(dataFile));
     const raw = require('fs').readFileSync(dataFile, 'utf8');
     assert.ok(!raw.includes('testtoken'), 'token must not be in the data file');
+  });
+  await step('working time: starts by itself, stop and start, PC restart, sleep', async () => {
+    const awake = t => page.evaluate(t => api('POST', '/api/test/awake', { t: new Date(t).toISOString() }), t);
+    assert.match(await page.textContent('#t-state'), /today, since \d\d:\d\d/);
+    assert.ok(await page.evaluate(() => !!S.time.open && S.time.autoFor !== ''), 'tracking started when the app started');
+    await page.click('#t-toggle');
+    assert.match(await page.textContent('#t-state'), /today, not tracking/);
+    assert.equal(await page.textContent('#t-toggle'), 'Start');
+    await page.evaluate(() => flush());
+    await page.reload(); await page.waitForSelector('#q'); await page.waitForTimeout(400);
+    assert.equal(await page.evaluate(() => S.time.open), null, 'a manual stop holds while the PC stays on');
+    // the PC starts again: tracking starts by itself, at the moment the PC came up
+    const up = Date.now() - 2 * 60000;
+    await page.evaluate(() => { S.time.beat = Date.now() - 10 * 60000; save(); return flush(); });   // as if the stop was ten minutes ago
+    await awake(up);
+    await page.reload(); await page.waitForSelector('#q');
+    await page.waitForFunction(() => !!S.time.open);
+    assert.ok(Math.abs(await page.evaluate(() => S.time.open.start) - up) < 1500);
+    // the PC was switched off without stopping: the period ends at the last sign of life, a new one starts
+    const now = Date.now();
+    await page.evaluate(n => { S.time.spans = []; S.time.open = { start: n - 90 * 60000 }; S.time.beat = n - 30 * 60000; save(); return flush(); }, now);
+    await awake(now - 5 * 60000);
+    await page.reload(); await page.waitForSelector('#q');
+    await page.waitForFunction(n => S.time.open && S.time.open.start > n - 6 * 60000, now);
+    const total = await page.evaluate(() => S.time.spans.reduce((x, p) => x + p.e - p.s, 0));
+    assert.ok(total >= 59 && total <= 61, 'the old period ends at the last sign of life, got ' + total);
+    // the tab was closed for a while but the PC stayed on: the period simply goes on
+    const keep = await page.evaluate(n => { S.time.spans = []; S.time.open = { start: n - 90 * 60000 }; S.time.beat = n - 30 * 60000; save(); return flush().then(() => S.time.open.start); }, Date.now());
+    await awake(Date.now() - 3 * 3600000);                 // the helper has been awake for three hours
+    await page.reload(); await page.waitForSelector('#q');
+    await page.waitForFunction(() => Date.now() - S.time.beat < 5000);
+    assert.equal(await page.evaluate(() => S.time.open.start), keep);
+    assert.equal(await page.evaluate(() => S.time.spans.length), 0);
+    assert.match(await page.textContent('#t-today'), /1 h 3\d min|^\d+ min$/);   // 90 minutes unless midnight is in between
+  });
+  await step('time view: hours per day, correct a day', async () => {
+    const yd = await page.evaluate(() => {
+      const d = dstr(addDays(new Date(), -1)), it = ticketByKey('OPS-103');
+      S.time.spans.push({ id: 'y1', day: d, s: 480, e: 720 });
+      S.time.log.push({ id: 'l1', itemId: it.id, key: 'OPS-103', summary: it.jira.summary, day: d, min: 30, note: '', at: Date.now(), wl: null });
+      save(); return d;
+    });
+    await page.click('[data-view=time]');
+    const row = `.dayrow[data-day="${yd}"]`;
+    assert.match(await page.textContent(row), /4 h\s*08:00\u201312:00\s*On tickets: OPS-103 30 min/);
+    assert.match(await page.textContent('.dayrow.today'), /\u2013now/);
+    await page.click(row + ' [data-act=day-edit]');
+    await page.fill('.sp-e', '12:30');
+    await page.click('[data-act=sp-add]');
+    assert.deepEqual(await page.$$eval('.row.sp input', els => els.map(e => e.value)), ['08:00', '12:30', '12:30', '13:30']);
+    await page.fill('.row.sp:nth-of-type(2) .sp-s', '12:00');
+    await page.fill('.lg-min', '1:15');
+    await page.click('[data-act=day-save]');
+    assert.match(await page.textContent('#de-err'), /overlap/);
+    await page.fill('.row.sp:nth-of-type(2) .sp-s', '13:00'); await page.fill('.row.sp:nth-of-type(2) .sp-e', '17:00');
+    await page.click('[data-act=day-save]');
+    await page.waitForFunction(() => !document.querySelector('.overlay'));
+    assert.match(await page.textContent(row), /8 h 30 min\s*08:00\u201312:30, 13:00\u201317:00\s*On tickets: OPS-103 1 h 15 min/);
+    assert.equal(await page.evaluate(d => workedOn(d), yd), 510);
+    await shot('15-time');
+    // autostart with Windows is a switch that the helper carries out
+    await page.click('[data-view=settings]');
+    await page.check('#s-autostart');
+    await page.waitForFunction(() => meta.autostart === true);
+    await page.uncheck('#s-autostart');
+    await page.waitForFunction(() => meta.autostart === false);
+    await page.fill('#s-tat', 'Change Request, Incident'); await page.locator('#s-tat').blur();
+    assert.deepEqual(await page.evaluate(() => S.settings.timeAskTypes), ['Change Request', 'Incident']);
+    await page.fill('#s-tat', ''); await page.locator('#s-tat').blur();
+    await page.click('[data-view=board]');
   });
   await step('update: quiet notice, notes, install, restart', async () => {
     await page.waitForSelector('.conn.upd');               // found by the automatic check after the start
@@ -274,7 +446,7 @@ const PORT = +process.env.FQ_PORT || 8765, JPORT = +process.env.FQ_JIRA_PORT || 
   await shot('09-board-full');
   await page.click('[data-view=rewards]'); await shot('10-rewards');
   await page.evaluate(() => { S.settings.theme = 'dark'; applyTheme(); }); await page.click('[data-view=board]');
-  await page.click('.item:has-text("onboarding checklist") .ibody'); await page.waitForSelector('#tr-area .btn'); await shot('11-dark');
+  await page.click('.item:has-text("onboarding checklist") .ibody'); await page.waitForSelector('#tr-area .row'); await shot('11-dark');
   await page.setViewportSize({ width: 420, height: 800 }); await page.click('[data-act=close-drawer]'); await shot('12-mobile');
   console.log('console errors:', errors.length ? errors : 'none');
   await browser.close();

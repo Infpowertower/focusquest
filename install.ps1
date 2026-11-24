@@ -7,6 +7,7 @@
 param(
     [string]$TargetDir = '',
     [switch]$NoShortcut,
+    [switch]$NoAutostart,
     [switch]$NoStart
 )
 
@@ -66,6 +67,26 @@ try {
             Write-Host 'The Start menu entry could not be created:' -ForegroundColor Yellow
             Write-Host $_.Exception.Message -ForegroundColor Yellow
             Write-Host "You can still start FocusQuest with $launcher" -ForegroundColor Yellow
+        }
+    }
+
+    # Start with Windows: a shortcut in the Startup folder of this user. Switch it off in FocusQuest
+    # under Settings, Time tracking, or run the installer with -NoAutostart.
+    if (-not $NoAutostart) {
+        try {
+            $startup = [Environment]::GetFolderPath('Startup')
+            if (-not (Test-Path -LiteralPath $startup)) { New-Item -ItemType Directory -Path $startup -Force | Out-Null }
+            $shell = New-Object -ComObject WScript.Shell
+            $sc = $shell.CreateShortcut((Join-Path $startup 'FocusQuest.lnk'))
+            $sc.TargetPath = $launcher
+            $sc.WorkingDirectory = $target
+            $sc.WindowStyle = 7
+            $sc.Description = 'Starts FocusQuest when you sign in'
+            $sc.Save()
+            Write-Host 'FocusQuest starts when you sign in to Windows (Settings, Time tracking switches this off).'
+        } catch {
+            Write-Host 'FocusQuest could not be set to start with Windows:' -ForegroundColor Yellow
+            Write-Host $_.Exception.Message -ForegroundColor Yellow
         }
     }
 

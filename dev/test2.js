@@ -10,6 +10,13 @@ const { chromium } = require('playwright'); const assert = require('assert');
   await page.click('[data-act=import]'); await page.waitForSelector('.toast.bad');
   await page.reload(); await page.waitForSelector('.item');
   assert.equal(await page.evaluate(() => S.items.length), 1);
+  // working time is tracked without the helper too
+  await page.waitForFunction(() => !!S.time.open);
+  assert.match(await page.textContent('#t-state'), /today, since/);
+  await page.click('#t-toggle');
+  assert.equal(await page.evaluate(() => S.time.open), null);
+  await page.reload(); await page.waitForSelector('.item'); await page.waitForTimeout(300);
+  assert.equal(await page.evaluate(() => S.time.open), null, 'stays stopped in the same browser session');
   console.log('ok   standalone mode');
   // 2) statistics + streak + three completions in one day
   await page.evaluate(() => { Math.random = () => 0.5; });

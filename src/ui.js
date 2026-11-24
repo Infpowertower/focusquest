@@ -61,6 +61,7 @@ function renderNav() { $$('#nav button').forEach(b => b.classList.toggle('on', b
 function renderMain() {
   renderNav();
   if (UI.view === 'rewards') renderRewards();
+  else if (UI.view === 'time') renderTime();
   else if (UI.view === 'settings') renderSettings();
   else renderBoard();
 }
@@ -116,6 +117,7 @@ function metaHtml(it) {
     out.push(`<span class="key">${esc(j.key)}</span>`);
     if (j.type) out.push(`<span class="tag">${esc(j.type)}</span>`);
     out.push(statusPill(j));
+    if (kids(j).length) out.push(`<span>${kids(j).length - openKids(j).length} of ${kids(j).length} sub-tickets done</span>`);
     if (it.fresh) out.push(`<span class="fresh">New activity</span>`);
     if (j.error) out.push(`<span class="due over">Refresh failed</span>`);
   }
@@ -129,7 +131,9 @@ function metaHtml(it) {
 
 function nowItem() {
   const t = today(), urgent = i => (i.due && i.due <= t) ? 0 : 1;
-  const c = openItems().sort((a, b) => ((b.focus ? 1 : 0) - (a.focus ? 1 : 0)) || (urgent(a) - urgent(b)) || cmpPrio(a, b));
+  // a ticket with open sub-tickets is not a next step: the work is in the sub-tickets
+  let pool = openItems().filter(i => !holdsOpen(i)); if (!pool.length) pool = openItems();
+  const c = pool.sort((a, b) => ((b.focus ? 1 : 0) - (a.focus ? 1 : 0)) || (urgent(a) - urgent(b)) || cmpPrio(a, b));
   if (!c.length) return null;
   let pick = c.find(i => !UI.skipped.has(i.id));
   if (!pick) { UI.skipped.clear(); pick = c[0]; }
@@ -148,7 +152,7 @@ function renderNow() {
       <h2>${esc(itemTitle(it))}</h2>
       <div class="meta">${metaHtml(it)}</div>
       <div class="now-actions">
-        ${tk ? `<button class="btn done big" data-act="close-ticket">Close ticket</button>` : `<button class="btn done big" data-act="toggle">Done</button>`}
+        ${tk ? (holdsOpen(it) ? '' : `<button class="btn done big" data-act="close-ticket">Close ticket</button>`) : `<button class="btn done big" data-act="toggle">Done</button>`}
         <button class="btn" data-act="open">Details</button>
         ${n > 1 ? `<button class="btn quiet" data-act="now-skip">Not now</button>` : ''}
       </div>
@@ -157,9 +161,10 @@ function renderNow() {
 
 function itemHtml(it) {
   const tk = it.kind === 'ticket';
-  const lab = it.done ? (tk ? 'Closed' : 'Mark as not done') : (tk ? 'Close ticket' : 'Mark as done');
+  const hold = holdsOpen(it);
+  const lab = it.done ? (tk ? 'Closed' : 'Mark as not done') : hold ? `Has ${nKids(openKids(it.jira).length)}` : (tk ? 'Close ticket' : 'Mark as done');
   return `<li class="item p${it.prio}${it.done ? ' done' : ''}${UI.sel === it.id ? ' sel' : ''}" data-id="${it.id}">
-      <button class="check${tk ? ' tk' : ''}" data-act="toggle" aria-label="${lab}: ${esc(itemTitle(it))}" title="${lab}"></button>
+      <button class="check${tk ? ' tk' : ''}${hold ? ' hold' : ''}" data-act="toggle" aria-label="${lab}: ${esc(itemTitle(it))}" title="${lab}"></button>
       <button class="ibody" data-act="open"><span class="title">${esc(itemTitle(it))}</span><span class="meta">${metaHtml(it)}</span></button>
       ${it.done ? '' : `<button class="pp p${it.prio}" data-act="cycle-prio" title="Priority. Click to change.">${PRIO[it.prio]}</button>
       <button class="star${it.focus ? ' on' : ''}" data-act="focus" title="${it.focus ? 'Remove focus' : 'Make this my focus'}" aria-label="${it.focus ? 'Remove focus' : 'Make this my focus'}" aria-pressed="${!!it.focus}">★</button>`}
@@ -303,21 +308,25 @@ function trHtml(it) {
   if (!jiraReady()) return `<p class="help">Connect Jira in Settings to comment on or close this ticket.</p>`;
   if (!tr) return `<p class="help"><span class="spin"></span>Loading the available actions</p>`;
   if (tr.error) return `<p class="err">${esc(tr.error)}</p>`;
-  const btns = tr.list.map(t => `<button class="btn ${t.done ? 'done' : ''}" data-act="transition" data-tr="${esc(t.id)}">${esc(t.name)}</button>`);
+  const hold = openKids(j).length;
+  const btns = tr.list.filter(t => !(hold && t.done)).map(t => `<button class="btn ${t.done ? 'done' : ''}" data-act="transition" data-tr="${esc(t.id)}">${esc(t.name)}</button>`);
   if (me && j.assigneeName !== me.name) btns.push(`<button class="btn" data-act="assign-me">Assign to me</button>`);
-  return `<div class="row wrap">${btns.join('') || '<span class="help">No actions available for you in this status.</span>'}</div>`;
+  return `<div class="row wrap">${btns.join('') || '<span class="help">No actions available for you in this status.</span>'}</div>
+    ${hold ? `<p class="help">This ticket has ${nKids(hold)}. It can be closed when they are done.</p>` : ''}`;
 }
 function ticketDrawer(it) {
-  const j = it.jira;
+  const j = it.jira, par = parentOf(j);
   const desc = richHtml(j.descHtml, j.descText);
   return `
     <div class="dhead"><span class="meta"><a class="key" href="${esc(browseUrl(j.key))}" target="_blank" rel="noopener noreferrer" title="Open in Jira">${esc(j.key)}</a>${j.type ? `<span class="tag">${esc(j.type)}</span>` : ''}${statusPill(j)}</span><button class="x" data-act="close-drawer" aria-label="Close details">×</button></div>
     <h2>${esc(j.summary)}</h2>
-    ${j.parentKey ? `<p class="help">Part of ${esc(j.parentKey)}</p>` : ''}
+    ${par ? `<p class="help">Part of <button class="chip" data-act="open-key" data-key="${esc(par.key)}">${esc(par.key)}${par.summary ? ' ' + esc(par.summary) : ''}</button></p>` : ''}
     <dl class="facts"><dt>Assignee</dt><dd>${esc(j.assignee || 'Unassigned')}</dd><dt>Author</dt><dd>${esc(j.author || 'Unknown')}</dd></dl>
     <div id="tr-area">${trHtml(it)}</div>
     <p class="help">${j.error ? `<span class="due over">The last refresh failed: ${esc(j.error)}</span> ` : ''}Refreshed ${esc(relTime(j.fetchedAt))}. <button class="chip" data-act="refresh-one">Refresh now</button></p>
     <details class="plan" ${UI.planOpen ? 'open' : ''}><summary>My priority, due date and reminder</summary>${planHtml(it)}</details>
+    ${kidsHtml(it)}
+    ${timeSectHtml(it)}
     <div class="sect"><h3>Description</h3><div class="rich">${desc || '<span class="help">No description.</span>'}</div></div>
     <div class="sect"><h3>Comments (${j.comments.length})</h3>
       ${j.comments.map(c => `<div class="cmt"><div class="cmt-h"><b>${esc(c.author)}</b>, ${esc(fmtDateTime(c.created))}</div><div class="rich">${richHtml(c.html, c.text)}</div></div>`).join('')}
@@ -410,6 +419,7 @@ async function refreshTicket(it, o = {}) {
     const j = await fetchIssue(old.key);
     if (!o.own && UI.sel !== it.id && (j.comments.length > old.comments.length || j.status !== old.status || j.assignee !== old.assignee)) it.fresh = true;
     it.jira = j; it.title = j.summary;
+    markKid(j);
     if (j.statusCat === 'done' && !it.done) {
       it.done = true; it.doneAt = Date.now(); it.doneDay = today(); it.focus = false;
       if (!o.own) { it.awarded = award('ticketClosedElsewhere', XP.ticketClosedElsewhere, `${j.key} was closed in Jira`); bumpDone(); }
@@ -469,6 +479,7 @@ async function addComment(it, btn) {
     award('comment', XP.comment, `Commented on ${it.jira.key}`); sound('done'); confetti(18, btn);
     await refreshTicket(it, { own: true });
     save(); renderDrawer(); refreshBoard();
+    if (asksTime(it)) askTime(it, { after: 'comment' });
   } catch (e) { busy(btn, false); toast(e.message, { kind: 'bad', ttl: 8000 }); }
 }
 async function assignMe(it, btn) {
@@ -484,6 +495,14 @@ async function assignMe(it, btn) {
 async function closeTicketFlow(it) {
   if (!requireJira()) return;
   if (it.done) { openItem(it.id); return; }
+  if (holdsOpen(it)) {
+    await refreshTicket(it, { own: true });        // a sub-ticket may have been closed in Jira in the meantime
+    save(); refreshBoard();
+    if (holdsOpen(it)) {
+      toast(`${it.jira.key} has ${nKids(openKids(it.jira).length)}. It can be closed when they are done.`, { ttl: 7000, actions: [{ label: 'Show them', fn: () => openItem(it.id) }] });
+      return;
+    }
+  }
   const tr = UI.tr[it.jira.key] && !UI.tr[it.jira.key].error ? UI.tr[it.jira.key] : await loadTransitions(it);
   if (!tr || tr.error) { toast((tr && tr.error) || 'Jira could not be reached.', { kind: 'bad' }); return; }
   const list = tr.list.filter(t => t.done);
@@ -536,12 +555,14 @@ async function doTransition(btn) {
     if (v !== null) fields[id] = v;
   }
   const cmt = $('#tr-cmt', w).value.trim();
+  let commented = false;
   busy(btn, true, 'Working');
   try {
     if (cmt) {
       await jira('POST', `rest/api/2/issue/${encodeURIComponent(key)}/comment`, { body: cmt });
       $('#tr-cmt', w).value = '';
       award('comment', XP.comment, `Commented on ${key}`, { lucky: false });
+      commented = true;
     }
     const body = { transition: { id: t.id } };
     if (Object.keys(fields).length) body.fields = fields;
@@ -555,7 +576,9 @@ async function doTransition(btn) {
   const closed = j ? j.statusCat === 'done' : t.done;
   if (closed && !wasDone) celebrateClose(it);
   else { award('transition', XP.transition, `${key} moved to ${j ? j.status : t.to}`); sound('done'); }
+  markKid(it.jira);
   save(); refreshBoard(); if (UI.sel === it.id) { renderDrawer(); if (!it.done) loadTransitions(it); }
+  if (commented && asksTime(it)) askTime(it, { after: 'comment' });
 }
 function celebrateClose(it) {
   it.done = true; it.doneAt = Date.now(); it.doneDay = today(); it.focus = false;
@@ -569,20 +592,21 @@ function celebrateClose(it) {
 /* ------------------------------------------------------------------ Jira: create ticket (with defaults, templates, own fields) */
 const tplById = id => S.ticketCfg.templates.find(t => t.id === id);
 const normVal = (f, v) => isMulti(f.kind) ? (Array.isArray(v) ? v.slice() : splitList(v)) : (Array.isArray(v) ? (v[0] || '') : String(v == null ? '' : v));
-const isSub = type => /sub/i.test(type || '');
 function todoDescription(todo) {
   const parts = [];
   if (todo.notes && todo.notes.trim()) parts.push(todo.notes.trim());
   if (todo.steps && todo.steps.length) parts.push(todo.steps.map(s => `* ${s.text}`).join('\n'));
   return parts.join('\n\n');
 }
-function tfDefaults(form) { TF.fields = {}; for (const f of form.fields) TF.fields[f.uid] = normVal(f, f.def); }
+function tfDefaults(form) { TF.fields = {}; for (const f of form.fields) TF.fields[f.uid] = normVal(f, f.def); tfEpic(form); }
+/* a ticket that is created inside an epic gets the epic's key in the form's "Epic Link" field */
+function tfEpic(form) { if (TF.epic) for (const f of form.fields) if (isEpicField(f)) TF.fields[f.uid] = isMulti(f.kind) ? [TF.epic] : TF.epic; }
 function openTicketForm(o = {}) {
   const isT = o.mode === 'template';
   if (!isT && !requireJira()) return;
   const t = o.tplId ? tplById(o.tplId) : null;
-  const form = (t && formById(t.formId)) || defForm();
-  TF = { mode: isT ? 'template' : 'create', todoId: o.todoId || null, tplId: o.tplId || '', name: '', formId: form.id, project: form.project, parent: '', summary: '', description: '', fields: {}, assignToMe: !!form.assignToMe, keep: true, fromCreate: false };
+  const form = (t && formById(t.formId)) || (o.formId && formById(o.formId)) || defForm();
+  TF = { mode: isT ? 'template' : 'create', todoId: o.todoId || null, tplId: o.tplId || '', name: '', formId: form.id, project: form.project, parent: o.parent || '', epic: o.epic || '', summary: '', description: '', fields: {}, assignToMe: !!form.assignToMe, keep: true, fromCreate: false };
   tfDefaults(form);
   const todo = TF.todoId ? byId(TF.todoId) : null;
   if (isT && t) {
@@ -617,7 +641,8 @@ function tfRender() {
     ${form.project ? `<p class="help" id="tf-where">${isT ? 'For' : 'Creates'} a ${esc(form.type)} in ${esc(form.project)}.</p>`
       : isT ? `<p class="help" id="tf-where">For a ${esc(form.type)}. This form has no project key yet.</p>`
       : `<label class="f" for="tf-project">Project key <small>for a ${esc(form.type)}. It is saved in the form.</small></label><input type="text" id="tf-project" value="${esc(TF.project)}" placeholder="For example: OPS">`}
-    ${isSub(form.type) ? `<label class="f" for="tf-parent">Parent ticket key</label><input type="text" id="tf-parent" value="${esc(TF.parent)}" placeholder="For example: OPS-123">` : ''}
+    ${TF.epic && !isT ? (form.fields.some(isEpicField) ? `<p class="help">It is added to the epic ${esc(TF.epic)}.</p>` : `<p class="help"><span class="due over">This form has no "Epic Link" field</span> The ticket will not be attached to ${esc(TF.epic)}. Add the field under Settings, Ticket forms, "Find fields in Jira".</p>`) : ''}
+    ${isSubForm(form) ? `<label class="f" for="tf-parent">Parent ticket key</label><input type="text" id="tf-parent" value="${esc(TF.parent)}" placeholder="For example: OPS-123">` : ''}
     <label class="f" for="tf-summary">Summary</label><input type="text" id="tf-summary" value="${esc(TF.summary)}">
     <label class="f" for="tf-desc">Description</label><textarea id="tf-desc" rows="6">${esc(TF.description)}</textarea>
     ${form.fields.map(tfField).join('')}
@@ -670,6 +695,7 @@ function tfApplyTemplate(id) {
     TF.summary = t.summary ? fill(t.summary).trim() : title;
     TF.description = t.description ? fill(t.description) : notes;
     for (const f of form.fields) if (t.fields && t.fields[f.uid] !== undefined) TF.fields[f.uid] = normVal(f, t.fields[f.uid]);
+    tfEpic(form);
   }
   tfRender();
 }
@@ -688,7 +714,7 @@ function tfSaveTemplate() {
 async function tfCreate(btn) {
   tfCollect();
   const form = formById(TF.formId) || defForm(), project = form.project || TF.project, type = form.type;
-  const errs = [], sub = isSub(type);
+  const errs = [], sub = isSubForm(form), above = (sub && TF.parent) || TF.epic;
   if (!project) errs.push('Enter the project key.');
   if (!TF.summary) errs.push('Enter a summary.');
   if (sub && !TF.parent) errs.push('A sub-task needs the key of its parent ticket.');
@@ -716,10 +742,218 @@ async function tfCreate(btn) {
   if (todo && TF.keep) { it = todo; it.kind = 'ticket'; it.jira = j; it.title = j.summary; }
   else { it = newTicketItem(j); S.items.push(it); }
   closeModal(TF.w); TF = null;
+  // the ticket above (parent or epic) lists the new one from now on
+  const up = above && ticketByKey(above);
+  if (up) refreshTicket(up, { own: true }).then(() => { save(); refreshBoard(); if (UI.sel) renderDrawer(); });
   award('ticketCreate', XP.ticketCreate, `Created ${j.key}`);
   confetti(90); sound('level');
   save(); refreshBoard(); openItem(it.id);
   toast(`${j.key} created in Jira.`, { ttl: 6000 });
+}
+
+/* ------------------------------------------------------------------ working time: sidebar clock, hours view, day editor */
+function renderClock() {
+  const box = $('#clock'); if (!box) return;
+  const T = S.time, on = !!T.open, tk = T.ticket ? byId(T.ticket.itemId) : null;
+  const since = on ? (dstr(new Date(T.open.start)) === today() ? hm(minOfDay(new Date(T.open.start))) : fmtWhen(T.open.start)) : '';
+  box.innerHTML = `<div class="clock${on ? ' on' : ''}">
+      <div class="clock-t"><b id="t-today">${esc(fmtDur(workedOn(today())))}</b><span id="t-state">${on ? `today, since ${esc(since)}` : 'today, not tracking'}</span></div>
+      <button class="btn small" data-act="time-toggle" id="t-toggle" title="${on ? 'Stop tracking your working time' : 'Start tracking your working time'}">${on ? 'Stop' : 'Start'}</button>
+    </div>
+    ${tk && tk.jira ? `<button class="conn tkt" data-act="open-item" data-item="${tk.id}" title="Timer running on this ticket"><i></i>${esc(tk.jira.key)}, ${esc(fmtDur((Date.now() - T.ticket.start) / 60000))}</button>` : ''}`;
+}
+const spanText = p => `${hm(p.s)}–${hm(p.e)}`;
+function daySpans(day) { return S.time.spans.filter(p => p.day === day).sort((a, b) => a.s - b.s); }
+function dayRowHtml(d) {
+  const ds = dstr(d), min = workedOn(ds), o = S.time.open;
+  const parts = daySpans(ds).map(spanText);
+  if (o && ds === today()) parts.push(`${dstr(new Date(o.start)) === ds ? hm(minOfDay(new Date(o.start))) : '00:00'}–now`);
+  const tl = {}; for (const e of S.time.log) if (e.day === ds) tl[e.key] = (tl[e.key] || 0) + e.min;
+  const tk = Object.keys(tl).map(k => `${esc(k)} ${esc(fmtDur(tl[k]))}`).join(', ');
+  if (!min && !tk && isWeekend(d)) return '';
+  return `<div class="dayrow${isWeekend(d) ? ' we' : ''}${ds === today() ? ' today' : ''}" data-day="${ds}">
+      <span class="d-name">${esc(d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' }))}</span>
+      <b class="d-sum">${min ? esc(fmtDur(min)) : '–'}</b>
+      <span class="d-det">${parts.length ? `<span>${parts.join(', ')}</span>` : ''}${tk ? `<span class="d-tk">On tickets: ${tk}</span>` : ''}</span>
+      <button class="btn small" data-act="day-edit">Edit</button>
+    </div>`;
+}
+function renderTime() {
+  const t = today(), now = parseD(t), mon = mondayOf(now), T = S.time;
+  const days = Array.from({ length: 14 }, (_, i) => addDays(now, i - 13));
+  const mins = days.map(d => workedOn(dstr(d))), max = Math.max(60, ...mins);
+  const weeks = UI.timeWeeks || 4, from = dstr(addDays(mon, -7 * (weeks - 1)));
+  const wkLog = S.time.log.filter(e => e.day >= dstr(mon)).reduce((n, e) => n + e.min, 0);
+  const per = {}; for (const e of T.log) if (e.day >= from) { (per[e.key] = per[e.key] || { key: e.key, summary: e.summary, min: 0 }).min += e.min; }
+  const perList = Object.values(per).sort((a, b) => b.min - a.min);
+  let h = `<h1 class="view-h">Time</h1>
+    <p class="lead">${T.open ? 'Your working time is being tracked.' : 'Your working time is not being tracked right now.'} Start and stop it on the left. Every day can be corrected here.</p>
+    <div class="tiles">
+      <div class="tile"><b>${esc(fmtDur(workedOn(t)))}</b><span>today</span></div>
+      <div class="tile"><b>${esc(fmtDur(workedInWeek(mon)))}</b><span>this week</span></div>
+      <div class="tile"><b>${esc(fmtDur(workedInWeek(addDays(mon, -7))))}</b><span>last week</span></div>
+      <div class="tile"><b>${esc(fmtDur(wkLog))}</b><span>on tickets this week</span></div>
+    </div>
+    <div class="card"><h2>Hours per day, last two weeks</h2>
+      <div class="bars">${days.map((x, i) => `<div class="${isWeekend(x) ? 'we' : ''}"><b>${mins[i] ? (Math.round(mins[i] / 6) / 10) : ''}</b><i style="height:${Math.round(mins[i] / max * 100)}%"></i>${x.toLocaleDateString('en-GB', { weekday: 'narrow' })}</div>`).join('')}</div>
+    </div>`;
+  for (let w = 0; w < weeks; w++) {
+    const m = addDays(mon, -7 * w);
+    const rows = Array.from({ length: 7 }, (_, i) => addDays(m, i)).filter(d => dstr(d) <= t).reverse().map(dayRowHtml).join('');
+    h += `<div class="card"><h2>${w === 0 ? 'This week' : w === 1 ? 'Last week' : 'Week from ' + esc(m.toLocaleDateString('en-GB', { day: 'numeric', month: 'long' }))} <small class="wk-sum">${esc(fmtDur(workedInWeek(m)))}</small></h2><div class="days">${rows}</div></div>`;
+  }
+  h += `<div class="row"><button class="btn" data-act="time-more">Show earlier weeks</button></div>
+    <div class="card"><h2>Time on tickets, last ${weeks} weeks</h2>
+      ${perList.length ? `<div class="kids">${perList.map(p => `<button class="kid" data-act="open-key" data-key="${esc(p.key)}"><span class="key">${esc(p.key)}</span><span class="grow">${esc(p.summary || '')}</span><b>${esc(fmtDur(p.min))}</b></button>`).join('')}</div>`
+      : `<p class="help">Nothing booked yet. Open a ticket to start its timer or to add time.</p>`}
+    </div>`;
+  $('#main').innerHTML = h;
+}
+
+/* day editor: working copies in UI.de until "Save" */
+function openDayEdit(day) {
+  UI.de = { day, spans: daySpans(day).map(p => ({ id: p.id, s: hm(p.s), e: hm(p.e) })), log: S.time.log.filter(e => e.day === day).map(e => ({ id: e.id, key: e.key, summary: e.summary, min: fmtDur(e.min), wl: e.wl })) };
+  UI.de.w = modal('', 'wide');
+  dayEditRender();
+}
+function dayEditRender() {
+  const d = UI.de, o = S.time.open, running = o && d.day === today();
+  $('.modal', d.w).innerHTML = `<h2>${esc(parseD(d.day).toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }))}</h2>
+    <h3 class="sub" style="margin-top:14px">Working hours</h3>
+    ${d.spans.map(p => `<div class="row sp" data-sp="${p.id}"><input type="time" class="sp-s" value="${esc(p.s)}" aria-label="Start"><span>to</span><input type="time" class="sp-e" value="${esc(p.e)}" aria-label="End"><button class="x" data-act="sp-del" aria-label="Remove this period">×</button></div>`).join('') || '<p class="help" style="margin-top:0">No working hours on this day.</p>'}
+    ${running ? `<p class="help">The period that is running since ${esc(hm(minOfDay(new Date(Math.max(o.start, parseD(d.day).getTime())))))} is not listed. Stop tracking to correct it.</p>` : ''}
+    <div class="row" style="margin-top:10px"><button class="chip" data-act="sp-add">Add a period</button></div>
+    ${d.log.length ? `<h3 class="sub">Time on tickets</h3>
+      ${d.log.map(e => `<div class="row lg" data-lg="${e.id}"><span class="key">${esc(e.key)}</span><span class="grow">${esc(e.summary || '')}</span><input type="text" class="lg-min" value="${esc(e.min)}" aria-label="Time spent on ${esc(e.key)}"><button class="x" data-act="lg-del" aria-label="Remove this entry">×</button></div>`).join('')}
+      ${d.log.some(e => e.wl) ? `<p class="help">Changes here stay in FocusQuest. Work logs already written to Jira are not changed.</p>` : ''}` : ''}
+    <div id="de-err"></div>
+    <div class="mfoot"><button class="btn" data-act="modal-close">Cancel</button><button class="btn primary" data-act="day-save">Save</button></div>`;
+}
+function dayEditCollect() {
+  const d = UI.de;
+  for (const p of d.spans) { const r = $(`[data-sp="${p.id}"]`, d.w); if (r) { p.s = $('.sp-s', r).value; p.e = $('.sp-e', r).value; } }
+  for (const e of d.log) { const r = $(`[data-lg="${e.id}"]`, d.w); if (r) e.min = $('.lg-min', r).value; }
+}
+function dayEditSave() {
+  dayEditCollect();
+  const d = UI.de, spans = [], mins = {};
+  for (const p of d.spans) {
+    const s = toMin(p.s), e = p.e === '00:00' ? 1440 : toMin(p.e);
+    if (s === null || e === null) { showErr('#de-err', 'Fill in the start and the end of every period.', d.w); return; }
+    if (e <= s) { showErr('#de-err', `The period ${p.s} to ${p.e} ends before it starts.`, d.w); return; }
+    spans.push({ id: p.id, day: d.day, s, e });
+  }
+  spans.sort((a, b) => a.s - b.s);
+  for (let i = 1; i < spans.length; i++) if (spans[i].s < spans[i - 1].e) { showErr('#de-err', `The periods ${spanText(spans[i - 1])} and ${spanText(spans[i])} overlap.`, d.w); return; }
+  for (const e of d.log) {
+    const m = parseDur(e.min);
+    if (!m || m < 1) { showErr('#de-err', `"${e.min}" for ${e.key} is not a time. Write it like 45, 1:30 or 1.5h.`, d.w); return; }
+    mins[e.id] = m;
+  }
+  S.time.spans = S.time.spans.filter(p => p.day !== d.day).concat(spans);
+  S.time.log = S.time.log.filter(e => e.day !== d.day || mins[e.id] !== undefined);
+  for (const e of S.time.log) if (mins[e.id] !== undefined) e.min = mins[e.id];
+  save(); closeModal(d.w); UI.de = null;
+  renderClock(); if (UI.view === 'time') renderTime(); if (UI.sel) renderDrawer();
+}
+
+/* time on a ticket */
+function timeSectHtml(it) {
+  const T = S.time, run = T.ticket && T.ticket.itemId === it.id, total = ticketMinutes(it.jira.key);
+  return `<div class="sect" id="tt-sect"><h3>Time${total ? ` <small>${esc(fmtDur(total))} booked</small>` : ''}</h3>
+    <div class="row wrap">
+      ${run ? `<button class="btn" data-act="tt-stop">Stop timer, ${esc(fmtDur((Date.now() - T.ticket.start) / 60000))}</button>` : `<button class="btn" data-act="tt-start">Start timer</button>`}
+      ${[15, 30, 60].map(m => `<button class="chip" data-act="tt-add" data-min="${m}">+${fmtDur(m)}</button>`).join('')}
+      <button class="chip" data-act="tt-other">Other</button>
+    </div></div>`;
+}
+/* after a comment: does the setting want to know the time for this ticket? */
+function asksTime(it) {
+  const s = S.settings; if (!s.timeAsk || !it.jira) return false;
+  const types = (s.timeAskTypes || []).map(x => x.toLowerCase());
+  if (!types.length) return true;
+  const j = it.jira;
+  if (types.includes(String(j.type || '').toLowerCase())) return true;
+  return !!(s.timeAskSubs && j.parentType && types.includes(j.parentType.toLowerCase()));
+}
+function askTime(it, o = {}) {
+  const T = S.time, run = T.ticket && T.ticket.itemId === it.id ? Math.max(1, Math.round((Date.now() - T.ticket.start) / 60000)) : 0;
+  const w = modal(`<h2>Time on ${esc(it.jira.key)}</h2>
+    <p class="lead">${o.after === 'comment' ? 'Your comment is in Jira. ' : ''}How much time did you spend on this ticket?${run ? ` The timer shows ${esc(fmtDur(run))}.` : ''}</p>
+    <div class="chips">${[15, 30, 60, 120].map(m => `<button class="chip" data-act="at-pick" data-min="${m}">${fmtDur(m)}</button>`).join('')}</div>
+    <label class="f" for="at-val">Time spent <small>45, 1:30 or 1.5h</small></label><input type="text" id="at-val" value="${run ? esc(fmtDur(run)) : ''}" autofocus>
+    <label class="f" for="at-note">Note <small>optional</small></label><input type="text" id="at-note">
+    ${jiraReady() ? `<div class="chips" style="margin-top:14px"><label class="chip"><input type="checkbox" id="at-jira" ${S.settings.timeJira ? 'checked' : ''}> Also add it to the work log in Jira</label></div>` : ''}
+    <div id="at-err"></div>
+    <div class="mfoot"><button class="btn" data-act="modal-close">${o.after ? 'Nothing to book' : 'Cancel'}</button><button class="btn primary" data-act="at-save">Book time</button></div>`);
+  UI.at = { id: it.id, w, run: !!run };
+}
+function askTimeSave(min) {
+  const a = UI.at, it = a && byId(a.id); if (!it) return;
+  if (min === undefined) min = parseDur($('#at-val', a.w).value);
+  if (!min || min < 1) { showErr('#at-err', 'Write the time like 45, 1:30 or 1.5h.', a.w); return; }
+  const j = $('#at-jira', a.w);
+  if (a.run) ticketTimerStop(null, false);          // the timer's time is what is being booked here
+  logTicketTime(it, min, $('#at-note', a.w).value.trim(), !!(j && j.checked));
+  save(); closeModal(a.w); UI.at = null;
+  toast(`${fmtDur(min)} booked on ${it.jira.key}.`);
+  renderClock(); if (UI.sel === it.id) renderDrawer(); if (UI.view === 'time') renderTime();
+}
+
+/* ------------------------------------------------------------------ sub-tickets */
+/* the ticket above this one: the parent of a sub-task, or the epic on the board that lists it */
+function parentOf(j) {
+  if (j.parentKey) return { key: j.parentKey, summary: j.parentSummary || '' };
+  const p = S.items.find(i => i.jira && i.jira.key !== j.key && kids(i.jira).some(k => k.key === j.key));
+  return p ? { key: p.jira.key, summary: p.jira.summary } : null;
+}
+const holdsOpen = it => it.kind === 'ticket' && it.jira && !it.done && openKids(it.jira).length > 0;
+const nKids = n => `${n} open sub-ticket${n === 1 ? '' : 's'}`;
+function kidsHtml(it) {
+  const j = it.jira, list = kids(j), epic = isEpicType(j.type);
+  if (j.subtask) return '';
+  const done = list.filter(k => k.statusCat === 'done').length;
+  const missing = list.filter(k => k.statusCat !== 'done' && !ticketByKey(k.key)).length;
+  return `<div class="sect" id="kids-sect"><h3>${epic ? 'Tickets in this epic' : 'Sub-tasks'}${list.length ? ` <small>${done} of ${list.length} done</small>` : ''}</h3>
+    ${j.kidsError ? `<p class="err">The tickets of this epic could not be loaded: ${esc(j.kidsError)}</p>` : ''}
+    ${list.length ? `<div class="kids">${list.map(k => {
+      const on = ticketByKey(k.key);
+      return `<button class="kid${k.statusCat === 'done' ? ' done' : ''}" data-act="open-key" data-key="${esc(k.key)}" title="${on ? 'Open' : 'Add to my board and open'}"><span class="key">${esc(k.key)}</span><span class="grow">${esc(k.summary)}</span>${statusPill(k)}${on ? '' : '<span class="tag">not on my board</span>'}</button>`;
+    }).join('')}</div>` : `<p class="help" style="margin-top:0">None yet.</p>`}
+    <div class="row wrap" style="margin-top:10px">
+      ${missing ? `<button class="chip" data-act="kids-import">Add the ${missing} open ${missing === 1 ? 'one' : 'ones'} to my board</button>` : ''}
+      <button class="chip" data-act="${epic ? 'new-in-epic' : 'new-subtask'}">${epic ? 'New ticket in this epic' : 'New sub-task'}</button>
+    </div></div>`;
+}
+/* a ticket changed: keep the list of the ticket above it in step, and say when that one is free to be closed */
+function markKid(j) {
+  for (const p of S.items) {
+    if (!p.jira || p.jira.key === j.key) continue;
+    const k = kids(p.jira).find(x => x.key === j.key); if (!k) continue;
+    const was = openKids(p.jira).length;
+    k.status = j.status; k.statusCat = j.statusCat; k.summary = j.summary;
+    if (was && !openKids(p.jira).length && !p.done) toast(`All sub-tickets of ${p.jira.key} are done. It can be closed now.`, { ttl: 9000, actions: [{ label: 'Open it', fn: () => openItem(p.id) }] });
+  }
+}
+const isSubForm = f => !!f && (f.subtask === true || (f.subtask !== false && /sub|unteraufgabe/i.test(f.type || '')));
+const isEpicField = f => /epic.?link/i.test(f.label || '') || /epic.?link/i.test(f.fieldId || '');
+const projectOf = key => String(key).replace(/-\d+$/, '');
+async function newSubtask(it, btn) {
+  if (!requireJira()) return;
+  const project = projectOf(it.jira.key);
+  let form = S.ticketCfg.forms.find(f => f.project === project && isSubForm(f));
+  if (!form) {
+    busy(btn, true, 'Asking Jira');
+    let types = [];
+    try { types = (await projectTypes(project)).filter(t => t.subtask); }
+    catch (e) { busy(btn, false); toast(e.message, { kind: 'bad', ttl: 8000 }); return; }
+    busy(btn, false);
+    if (!types.length) { toast(`Project ${project} has no ticket type for sub-tasks.`, { kind: 'bad' }); return; }
+    form = { id: 'form_' + uid(), name: '', project, type: types[0].name, subtask: true, assignToMe: true, fields: [] };
+    S.ticketCfg.forms.push(form); save();
+    toast(`The ticket form "${formLabel(form)}" was added. If Jira asks for more fields, add them under Settings, Ticket forms.`, { ttl: 9000 });
+  }
+  openTicketForm({ formId: form.id, parent: it.jira.key });
 }
 
 /* ------------------------------------------------------------------ rewards view */
@@ -844,6 +1078,22 @@ function renderSettings() {
       ${ns === 'default' ? `<button class="btn" data-act="notif-on" style="margin-top:8px">Turn on notifications</button>` : ns === 'granted' ? `<button class="btn" data-act="notif-test" style="margin-top:8px">Send a test reminder</button>` : ''}
     </div>
 
+    <div class="card"><h2>Time tracking</h2>
+      <p class="lead">The clock on the left counts your working time. The Time view shows every day and lets you correct it.</p>
+      <div class="chips">
+        <label class="chip"><input type="checkbox" data-ch="set" data-path="settings.timeAuto" ${s.timeAuto ? 'checked' : ''}> ${SERVED ? 'Start tracking when the PC starts or wakes up' : 'Start tracking when FocusQuest is opened'}</label>
+        ${SERVED ? `<label class="chip"><input type="checkbox" data-ch="autostart" id="s-autostart" ${meta.autostart ? 'checked' : ''}> Start FocusQuest when I sign in to Windows</label>` : ''}
+      </div>
+      <h3 class="sub">Time on tickets</h3>
+      <div class="chips">
+        <label class="chip"><input type="checkbox" data-ch="set" data-path="settings.timeAsk" ${s.timeAsk ? 'checked' : ''}> Ask for the time spent after each comment</label>
+        <label class="chip"><input type="checkbox" data-ch="set" data-path="settings.timeJira" ${s.timeJira ? 'checked' : ''}> Also add booked time to the work log in Jira</label>
+      </div>
+      <label class="f" for="s-tat">Only ask for these ticket types <small>separated by commas, spelled as in Jira. Empty means all.</small></label>
+      <input type="text" id="s-tat" data-ch="set" data-path="settings.timeAskTypes" data-list="1" value="${esc((s.timeAskTypes || []).join(', '))}" placeholder="For example: Change Request">
+      <div class="chips"><label class="chip"><input type="checkbox" data-ch="set" data-path="settings.timeAskSubs" ${s.timeAskSubs ? 'checked' : ''}> and for their sub-tasks</label></div>
+    </div>
+
     ${SERVED ? `<div class="card"><h2>Updates</h2>
       <p class="lead" id="upd-state">${updState()}</p>
       <div class="row wrap">${UPD && UPD.available ? `<button class="btn primary" data-act="update-open">Show the update</button>` : ''}<button class="btn" data-act="update-check">Check for updates</button></div>
@@ -895,14 +1145,14 @@ async function formTypes(btn) {
   if (!requireJira()) return;
   if (!form.project) { toast('Enter the project key of this form first.', { kind: 'bad' }); return; }
   busy(btn, true, 'Loading');
-  let names = [];
-  try { names = await projectTypes(form.project); if (!names.length) throw new Error(`Jira lists no ticket types for ${form.project}.`); }
+  let types = [];
+  try { types = await projectTypes(form.project); if (!types.length) throw new Error(`Jira lists no ticket types for ${form.project}.`); }
   catch (e) { busy(btn, false); toast(e.message, { kind: 'bad', ttl: 8000 }); return; }
   busy(btn, false);
   const w = modal(`<h2>Ticket types in ${esc(form.project)}</h2><p class="lead">Choose the type this form creates.</p>
-    <div class="picklist">${names.map(n => `<label class="pick"><input type="radio" name="ft" value="${esc(n)}" ${n === form.type ? 'checked' : ''}><span class="grow">${esc(n)}</span></label>`).join('')}</div>
+    <div class="picklist">${types.map(t => `<label class="pick"><input type="radio" name="ft" value="${esc(t.name)}" ${t.name === form.type ? 'checked' : ''}><span class="grow">${esc(t.name)}${t.subtask ? ' <span class="help">sub-task</span>' : ''}</span></label>`).join('')}</div>
     <div class="mfoot"><button class="btn" data-act="modal-close">Cancel</button><button class="btn primary" id="ft-ok">Use this type</button></div>`);
-  $('#ft-ok', w).onclick = () => { const r = $('input[name=ft]:checked', w); if (r) { form.type = r.value; save(); } closeModal(w); renderSettings(); };
+  $('#ft-ok', w).onclick = () => { const r = $('input[name=ft]:checked', w); if (r) { form.type = r.value; form.subtask = !!(types.find(t => t.name === r.value) || {}).subtask; save(); } closeModal(w); renderSettings(); };
 }
 function fldBrowse() {
   const form = curForm();
@@ -1020,6 +1270,7 @@ function checkReminders() {
 }
 function tick() {
   checkReminders();
+  timeSync(); renderClock();
   if (UI.day !== today()) { UI.day = today(); renderPlayer(); refreshBoard(); }
   if (SERVED && S.settings.updateCheck && !helperDown && Date.now() - (UI.lastUpdCheck || 0) > 6 * 3600000) checkUpdate(false);
   const min = +S.settings.refreshMin || 0;
@@ -1146,6 +1397,50 @@ const ACT = {
     if (names.length > 12) toast(`${f.name} added. It has ${names.length} choices: use "Pick the choices from Jira" to keep only yours.`, { ttl: 8000 });
   },
 
+  async 'time-toggle'() {
+    if (S.time.open) timeStop(); else timeStart();
+    const a = await awakeSince(false); if (a) S.time.autoFor = String(a);   // a manual choice holds until the PC starts again
+    save(); renderClock(); if (UI.view === 'time') renderTime(); if (UI.sel) renderDrawer();
+  },
+  'time-more'() { UI.timeWeeks = (UI.timeWeeks || 4) + 4; renderTime(); },
+  'day-edit'(el) { openDayEdit(el.closest('[data-day]').dataset.day); },
+  'day-save'() { dayEditSave(); },
+  'sp-add'() {
+    dayEditCollect();
+    const d = UI.de, last = d.spans[d.spans.length - 1], s = last && toMin(last.e) !== null ? Math.min(toMin(last.e), 23 * 60) : 9 * 60;
+    d.spans.push({ id: uid(), s: hm(s), e: hm(Math.min(s + (last ? 60 : 480), 1439)) });
+    dayEditRender();
+  },
+  'sp-del'(el) { dayEditCollect(); const id = el.closest('[data-sp]').dataset.sp; UI.de.spans = UI.de.spans.filter(p => p.id !== id); dayEditRender(); },
+  'lg-del'(el) { dayEditCollect(); const id = el.closest('[data-lg]').dataset.lg; UI.de.log = UI.de.log.filter(e => e.id !== id); dayEditRender(); },
+  'tt-start'(el, it) { ticketTimerStart(it); save(); renderClock(); renderDrawer(); },
+  'tt-stop'(el, it) { const min = ticketTimerStop(); save(); renderClock(); renderDrawer(); toast(min >= 1 ? `${fmtDur(min)} booked on ${it.jira.key}.` : 'Less than a minute, nothing booked.'); },
+  'tt-add'(el, it) { const min = +el.dataset.min; logTicketTime(it, min, '', S.settings.timeJira); save(); renderDrawer(); toast(`${fmtDur(min)} booked on ${it.jira.key}.`); },
+  'tt-other'(el, it) { askTime(it); },
+  'at-pick'(el) { askTimeSave(+el.dataset.min); },
+  'at-save'() { askTimeSave(); },
+  'open-item'(el) { const it = byId(el.dataset.item); if (it) { if (UI.view !== 'board') { UI.view = 'board'; renderMain(); } openItem(it.id); } },
+  async 'open-key'(el) {
+    const key = el.dataset.key; let it = ticketByKey(key);
+    if (!it) {
+      if (!requireJira()) return;
+      busy(el, true, 'Adding');
+      const r = await importKeys([key]); it = ticketByKey(key);
+      if (!it) { busy(el, false); toast((r.failed[0] && r.failed[0].msg) || `${key} could not be added.`, { kind: 'bad', ttl: 8000 }); return; }
+    }
+    if (UI.view !== 'board') { UI.view = 'board'; renderMain(); }
+    openItem(it.id);
+  },
+  async 'kids-import'(el, it) {
+    if (!requireJira()) return;
+    busy(el, true, 'Adding');
+    const r = await importKeys(openKids(it.jira).filter(k => !ticketByKey(k.key)).map(k => k.key));
+    renderDrawer();
+    if (r.failed.length) toast(`${r.failed.length} could not be added: ${r.failed[0].msg}`, { kind: 'bad', ttl: 8000 });
+  },
+  'new-subtask'(el, it) { newSubtask(it, el); },
+  'new-in-epic'(el, it) { if (requireJira()) openTicketForm({ epic: it.jira.key }); },
+
   'update-open'() { openUpdate(); },
   'update-apply'(el) { applyUpdate(el); },
   async 'update-check'(el) { busy(el, true, 'Checking'); await checkUpdate(true); if (UI.view === 'settings') renderSettings(); },
@@ -1211,6 +1506,7 @@ const CH = {
     for (const k of path.slice(0, -1)) o = o[k];
     let v = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Math.min(+el.max || 1e9, Math.max(+el.min || 0, Math.round(+el.value || 0))) : el.value.trim();
     if (el.dataset.upper) v = v.toUpperCase();
+    if (el.dataset.list) v = splitList(v);
     o[path[path.length - 1]] = v;
     save();
     const p = el.dataset.path;
@@ -1228,12 +1524,17 @@ const CH = {
   },
   'tf-form'(el) { tfCollect(); tfSetForm(el.value); },
   'form-sel'(el) { UI.formSel = el.value; renderSettings(); },
+  async autostart(el) {
+    try { const r = await api('POST', '/api/autostart', { enabled: el.checked }); meta.autostart = !!(r && r.autostart); }
+    catch (e) { toast(e.message, { kind: 'bad', ttl: 8000 }); }
+    el.checked = !!meta.autostart;
+  },
   'form-default'(el) { if (el.checked) { S.ticketCfg.defaultForm = curForm().id; save(); renderSettings(); } },
   form(el) {
     const f = curForm(), k = el.dataset.k;
     if (k === 'assignToMe') { f.assignToMe = el.checked; save(); return; }
     if (k === 'project') f.project = el.value.trim().toUpperCase();
-    else if (k === 'type') f.type = el.value.trim() || f.type;
+    else if (k === 'type') { f.type = el.value.trim() || f.type; delete f.subtask; }
     else f[k] = el.value.trim();
     save(); redrawSettings();
   },
@@ -1276,6 +1577,7 @@ function wire() {
       e.preventDefault(); return;
     }
     if (e.key === 'Enter' && t.classList.contains('dtitle')) { e.preventDefault(); t.blur(); return; }
+    if (e.key === 'Enter' && t.id === 'at-val') { e.preventDefault(); askTimeSave(); return; }
     if (e.key === 'Enter' && t.id === 'imp-keys') { e.preventDefault(); const b = $('[data-act="imp-keys"]'); if (b && !b.disabled) ACT['imp-keys'](b); return; }
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && t.id === 'cmt') { const b = $('[data-act="add-comment"]'); if (b && !b.disabled) addComment(byId(UI.sel), b); return; }
     if (!typing && !e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'n' || e.key === '/') && !$('#modals').children.length) {
@@ -1307,7 +1609,7 @@ function restoreBackup(input) {
   };
   rd.readAsText(file);
 }
-function renderAll() { applyTheme(); renderPlayer(); renderRailFoot(); renderMain(); if (UI.sel) renderDrawer(); }
+function renderAll() { applyTheme(); renderPlayer(); renderClock(); renderRailFoot(); renderMain(); if (UI.sel) renderDrawer(); }
 
 async function start() {
   wire();
@@ -1321,6 +1623,7 @@ async function start() {
     return;
   }
   renderAll();
+  timeSync();
   const q = $('#q'); if (q) q.focus();
   const t = today(), open = openItems(), over = open.filter(i => i.due && i.due < t).length, due = open.filter(i => i.due === t).length;
   if (over || due) toast(`${due ? `${due} due today` : ''}${due && over ? ', ' : ''}${over ? `${over} overdue` : ''}. Pick one and start small.`, { ttl: 6000 });

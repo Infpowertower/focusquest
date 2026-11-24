@@ -154,6 +154,22 @@ try {
     Check ((Call 'PUT' '/api/data' $data).status -eq 200) 'data saved'
     Check ((Call 'GET' '/api/data').text -eq $data) 'data comes back unchanged, umlauts and emoji included'
 
+    # ------------------------------------------------------------ PC session and start with Windows
+    $awake = [DateTime]::Parse([string]$st.json.awakeSince, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
+    Check (([DateTime]::UtcNow - $awake.ToUniversalTime()).TotalSeconds -lt 120 -and ([DateTime]::UtcNow - $awake.ToUniversalTime()).TotalSeconds -ge 0) 'state reports when this PC session began'
+    $link = Join-Path ([Environment]::GetFolderPath('Startup')) 'FocusQuest.lnk'
+    $hadLink = Test-Path -LiteralPath $link
+    Check ((Call 'POST' '/api/autostart' '{"enabled":false}').json.autostart -eq $false -and -not (Test-Path -LiteralPath $link)) 'start with Windows switched off: no shortcut'
+    $r = Call 'POST' '/api/autostart' '{"enabled":true}'
+    Check ($r.status -eq 200 -and $r.json.autostart -eq $true -and (Test-Path -LiteralPath $link)) 'start with Windows switched on: shortcut in the Startup folder'
+    if (Test-Path -LiteralPath $link) {
+        $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($link)
+        Check ($sc.TargetPath -eq (Join-Path $Install 'Start-FocusQuest.cmd')) 'the shortcut starts this FocusQuest'
+    }
+    Check ((Call 'GET' '/api/state').json.autostart -eq $true) 'state reports start with Windows'
+    Check ((Call 'POST' '/api/autostart' '{"enabled":true}' -NoToken).status -eq 403) 'start with Windows without secret: refused'
+    if (-not $hadLink) { Call 'POST' '/api/autostart' '{"enabled":false}' | Out-Null }
+
     # ------------------------------------------------------------ update check
     $r = (Call 'GET' '/api/update/check?force=1').json
     Check ($r.ok -eq $true -and $r.available -eq $false -and $r.current -eq $cur -and $r.latest -eq $cur) 'same version on GitHub: nothing to do'

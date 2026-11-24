@@ -29,6 +29,10 @@ $utf8     = New-Object System.Text.UTF8Encoding($false)
 $script:lastBackupDay = ''
 $script:running = $true
 $script:restart = $false
+# When this PC session began: the start of the helper, or the last time the PC woke up from sleep.
+# The page uses it to end a period of working time that was cut off and to start a new one.
+$script:awakeSince = [DateTime]::UtcNow
+$script:lastTick = [DateTime]::UtcNow
 $script:update = $null
 
 # Updates come from the releases of this GitHub repository and from nowhere else.
@@ -194,6 +198,32 @@ function Save-Data([string]$json) {
     [System.IO.File]::WriteAllText($tmp, $json, $utf8)
     if (Test-Path -LiteralPath $dataFile) { [System.IO.File]::Delete($dataFile) }
     [System.IO.File]::Move($tmp, $dataFile)
+}
+
+# ---------------------------------------------------------------- start with Windows
+# A shortcut in the Startup folder of this Windows user. No admin rights, no registry.
+$startupLink = Join-Path ([Environment]::GetFolderPath('Startup')) 'FocusQuest.lnk'
+function Set-Autostart([bool]$on) {
+    if (-not $on) {
+        if (Test-Path -LiteralPath $startupLink) { Remove-Item -LiteralPath $startupLink -Force }
+        return
+    }
+    $dir = Split-Path -Parent $startupLink
+    if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $shell = New-Object -ComObject WScript.Shell
+    $sc = $shell.CreateShortcut($startupLink)
+    $sc.TargetPath = (Join-Path $root 'Start-FocusQuest.cmd')
+    $sc.WorkingDirectory = $root
+    $sc.WindowStyle = 7
+    $sc.Description = 'Starts FocusQuest when you sign in'
+    $sc.Save()
+}
+
+# The helper looks at the clock a few times per second. A jump of minutes means the PC was asleep.
+function Update-Awake {
+    $now = [DateTime]::UtcNow
+    if (($now - $script:lastTick).TotalSeconds -gt 180) { $script:awakeSince = $now }
+    $script:lastTick = $now
 }
 
 # ---------------------------------------------------------------- updates
@@ -495,6 +525,8 @@ function Invoke-Request($ctx) {
     if ($path -eq '/api/state' -and $method -eq 'GET') {
         Send-Json $ctx 200 @{
             version = $version
+            awakeSince = $script:awakeSince.ToString('o')
+            autostart = (Test-Path -LiteralPath $startupLink)
             jira = @{
                 baseUrl  = [string]$cfg.jiraBaseUrl
                 hasToken = (-not [string]::IsNullOrEmpty([string]$cfg.jiraToken))
@@ -534,6 +566,12 @@ function Invoke-Request($ctx) {
         if ($null -ne $o.token) { $cfg.jiraToken = Protect-Token (([string]$o.token).Trim()) }
         Save-Config
         Send-Text $ctx 200 'application/json; charset=utf-8' '{"ok":true}'
+        return
+    }
+    if ($path -eq '/api/autostart' -and $method -eq 'POST') {
+        $o = (Read-Body $req) | ConvertFrom-Json
+        Set-Autostart ($o.enabled -eq $true)
+        Send-Json $ctx 200 @{ ok = $true; autostart = (Test-Path -LiteralPath $startupLink) }
         return
     }
     if ($path -eq '/api/update/check' -and $method -eq 'GET') {
@@ -624,10 +662,12 @@ if (-not $NoBrowser) { Start-Process "http://localhost:$listenPort/" }
 try {
     while ($script:running -and $listener.IsListening) {
         $task = $listener.GetContextAsync()
-        while (-not $task.Wait(300)) { }
+        while (-not $task.Wait(300)) { Update-Awake }
+        Update-Awake
         $ctx = $task.Result
         try {
             Invoke-Request $ctx
+            $script:lastTick = [DateTime]::UtcNow   # a long request (download, slow Jira) is not sleep
         } catch {
             Write-Host ((Get-Date).ToString('HH:mm:ss') + '  ' + $_.Exception.Message) -ForegroundColor Yellow
             try { Send-Error $ctx 500 $_.Exception.Message } catch { }

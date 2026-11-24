@@ -56,7 +56,7 @@ FILES
 -----
 Install-FocusQuest.cmd installs into your user profile and adds the Start menu entry
 install.ps1            the installer script behind it
-Start-FocusQuest.cmd   starts everything
+Start-FocusQuest.cmd   starts everything (the Start menu entry and the start with Windows use it)
 server.ps1             the helper: serves the page, saves your data, relays calls to Jira,
                        looks for updates and installs them
 app.html               the app itself
@@ -102,6 +102,30 @@ To-do to ticket  open the to-do > "Create Jira ticket from this". Choose a templ
                  filled in.
 Statistics       the left side shows what you created, closed and commented today.
                  Rewards shows the totals.
+Sub-tickets      a ticket with sub-tasks, or an epic, lists them in its details. Click one
+                 to open it (it is added to your board if needed). "New sub-task" and
+                 "New ticket in this epic" create one. While sub-tickets are open, the ticket
+                 above them cannot be closed and is not suggested as "Up next".
+                 For "New ticket in this epic" the ticket form needs the field "Epic Link"
+                 (Settings > Ticket forms > Find fields in Jira).
+
+
+WORKING TIME
+------------
+Clock            the box on the left shows today's working time. Start and Stop are there.
+                 With "Start tracking when the PC starts or wakes up" (Settings > Time
+                 tracking) it starts by itself, and it ends by itself when the PC is
+                 switched off or goes to sleep. A locked screen does not stop it.
+Start with       the installer adds FocusQuest to the programs that start when you sign in.
+Windows          Settings > Time tracking switches this on and off.
+Time view        every day with its working hours, per week. "Edit" corrects the periods
+                 of a day and the time booked on tickets.
+Time on tickets  open a ticket: "Start timer", or +15 min, +30 min, +1 h, or "Other" for
+                 any amount (45, 1:30, 1.5h). After each comment FocusQuest asks how much
+                 time you spent. Settings > Time tracking switches the question off or
+                 limits it to some ticket types (and their sub-tasks).
+Work log         booked time stays in FocusQuest. With "Also add booked time to the work
+                 log in Jira" it is written to the ticket in Jira as well.
 
 
 IF SOMETHING DOES NOT WORK

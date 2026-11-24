@@ -53,10 +53,15 @@ function defaults() {
     game: { xp: 0, log: [], streak: { count: 0, last: null, best: 0 }, counts: {}, days: {}, badges: {} },
     settings: {
       sound: true, motion: true, theme: 'auto', sort: 'prio', dayRemindTime: '09:00', refreshMin: 15, updateCheck: true,
+      timeAuto: true, timeAsk: true, timeAskTypes: [], timeAskSubs: true, timeJira: false,
       jql: 'assignee = currentUser() AND resolution = Unresolved ORDER BY updated DESC'
     },
     // forms: one per kind of ticket you create (Jira project + ticket type + its fields). Templates belong to a form.
-    ticketCfg: { forms: [], defaultForm: '', templates: [] }
+    ticketCfg: { forms: [], defaultForm: '', templates: [] },
+    // working time. open: the running period { start }. beat: last moment the page was alive while tracking.
+    // spans: finished periods { id, day, s, e } in minutes of that day. ticket: running ticket timer { itemId, start }.
+    // log: time booked on tickets { id, itemId, key, summary, day, min, note, at, wl }.
+    time: { open: null, beat: 0, autoFor: '', spans: [], ticket: null, log: [] }
   };
 }
 function merge(def, obj) {
@@ -109,12 +114,13 @@ const defForm = () => formById(S.ticketCfg.defaultForm) || S.ticketCfg.forms[0];
 const formLabel = f => f.name || (f.project ? `${f.type} in ${f.project}` : f.type);
 
 let S = defaults();
-let meta = { version: '', jira: { baseUrl: '', hasToken: false } };
+let meta = { version: '', awakeSince: '', autostart: false, jira: { baseUrl: '', hasToken: false } };
 let UPD = null;               // answer of the last update check (from the helper)
 let me = null;                // Jira user (from /myself)
 let loadFailed = false;
 let helperDown = false;
 let saveTimer = null;
+let saveLoud = false;         // false while only the time heartbeat changed: other tabs need no reload for that
 const bc = ('BroadcastChannel' in window) ? new BroadcastChannel('focusquest') : null;
 
 async function api(method, path, body) {
@@ -128,8 +134,9 @@ async function api(method, path, body) {
   return j;
 }
 
-function save() {
+function save(o) {
   if (loadFailed) return;
+  if (!(o && o.quiet)) saveLoud = true;
   S.rev = (S.rev || 0) + 1;
   try { localStorage.setItem('focusquest', JSON.stringify(S)); } catch (e) { /* storage full or blocked */ }
   if (!SERVED) return;
@@ -142,7 +149,8 @@ async function flush() {
   try {
     await api('PUT', '/api/data', S);
     if (helperDown) { helperDown = false; renderRailFoot(); }
-    if (bc) bc.postMessage({ rev: S.rev });
+    if (bc && saveLoud) bc.postMessage({ rev: S.rev });
+    saveLoud = false;
   } catch (e) {
     if (!helperDown) { helperDown = true; renderRailFoot(); toast('The FocusQuest helper is not running. Changes stay in this browser until you start it again.', { kind: 'bad', ttl: 9000 }); }
     saveTimer = setTimeout(flush, 8000);
@@ -216,6 +224,128 @@ function parseQuick(text) {
   }
   if (time && !due) due = today();
   return { title: words.join(' '), prio, due, time };
+}
+
+/* ------------------------------------------------------------------ working time */
+const GAP = 3 * 60000;        // no sign of life for this long while tracking: the page was asleep, closed or the PC was off
+const hm = min => `${pad(Math.floor(min / 60))}:${pad(min % 60)}`;
+const toMin = s => { const m = /^(\d{1,2}):(\d{2})$/.exec(String(s || '').trim()); return m && +m[1] <= 24 && +m[2] < 60 ? Math.min(1440, +m[1] * 60 + +m[2]) : null; };
+const minOfDay = d => d.getHours() * 60 + d.getMinutes();
+function fmtDur(min) {
+  min = Math.max(0, Math.round(min || 0));
+  const h = Math.floor(min / 60), m = min % 60;
+  return h ? (m ? `${h} h ${m} min` : `${h} h`) : `${m} min`;
+}
+/* "45", "45m", "1:30", "1h 30", "1.5h", "1,5 std" -> minutes. A bare whole number means minutes. */
+function parseDur(s) {
+  s = String(s || '').trim().toLowerCase().replace(',', '.'); let m;
+  if (!s) return null;
+  if ((m = /^(\d{1,2}):(\d{2})$/.exec(s))) return +m[1] * 60 + +m[2];
+  if ((m = /^(\d+)\s*(?:h|std)[a-z]*\.?\s*(\d+)\s*(?:m[a-z]*\.?)?$/.exec(s))) return +m[1] * 60 + +m[2];
+  if ((m = /^(\d+(?:\.\d+)?)\s*(?:h|std)[a-z]*\.?$/.exec(s))) return Math.round(+m[1] * 60);
+  if ((m = /^(\d+)\s*(?:m[a-z]*\.?)?$/.exec(s))) return +m[1];
+  if ((m = /^(\d+\.\d+)$/.exec(s))) return Math.round(+m[1] * 60);
+  return null;
+}
+/* stores a finished period in whole minutes, split at midnight */
+function addSpans(startTs, endTs) {
+  let a = new Date(startTs); const b = new Date(endTs);
+  for (let guard = 0; guard < 60 && a < b; guard++) {
+    const day = dstr(a), last = dstr(b) === day;
+    const s = minOfDay(a), e = last ? minOfDay(b) : 1440;
+    if (e > s) S.time.spans.push({ id: uid(), day, s, e });
+    if (last) break;
+    a = addDays(parseD(day), 1);
+  }
+}
+function timeStart(at) {
+  const T = S.time; if (T.open) return;
+  T.open = { start: at || Date.now() }; T.beat = Date.now();
+}
+function timeStop(at) {
+  const T = S.time; if (!T.open) return;
+  const end = at || Date.now();
+  if (T.ticket) ticketTimerStop(end);
+  addSpans(T.open.start, end);
+  T.open = null;
+}
+/* minutes worked on a day, the running period included */
+function workedOn(day) {
+  let n = 0;
+  for (const p of S.time.spans) if (p.day === day) n += p.e - p.s;
+  const o = S.time.open;
+  if (o) {
+    const d0 = parseD(day).getTime(), a = Math.max(o.start, d0), b = Math.min(Date.now(), d0 + 86400000);
+    if (b > a) n += Math.floor((b - a) / 60000);
+  }
+  return n;
+}
+const mondayOf = d => addDays(d, -((d.getDay() + 6) % 7));
+function workedInWeek(monday) { let n = 0; for (let i = 0; i < 7; i++) n += workedOn(dstr(addDays(monday, i))); return n; }
+
+/* time booked on tickets */
+const ticketLogOf = key => S.time.log.filter(e => e.key === key);
+const ticketMinutes = key => ticketLogOf(key).reduce((n, e) => n + e.min, 0);
+function jiraStamp(d) {
+  const off = -d.getTimezoneOffset(), a = Math.abs(off);
+  return `${dstr(d)}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.000${off >= 0 ? '+' : '-'}${pad(Math.floor(a / 60))}${pad(a % 60)}`;
+}
+function logTicketTime(it, min, note, toJira) {
+  const e = { id: uid(), itemId: it.id, key: it.jira.key, summary: it.jira.summary, day: today(), min, note: note || '', at: Date.now(), wl: null };
+  S.time.log.push(e);
+  if (toJira && jiraReady()) {
+    const body = { timeSpentSeconds: min * 60, started: jiraStamp(new Date(Date.now() - min * 60000)) };
+    if (note) body.comment = note;
+    jira('POST', `rest/api/2/issue/${encodeURIComponent(e.key)}/worklog`, body)
+      .then(r => { e.wl = (r && r.id) || 'yes'; save(); })
+      .catch(err => toast(`The time is kept in FocusQuest, but Jira did not take the work log for ${e.key}: ${err.message}`, { kind: 'bad', ttl: 9000 }));
+  }
+  return e;
+}
+function ticketTimerStart(it) {
+  if (S.time.ticket) ticketTimerStop();
+  if (!S.time.open) timeStart();
+  S.time.ticket = { itemId: it.id, start: Date.now() };
+}
+/* ends the ticket timer and books what it measured. Returns the minutes. */
+function ticketTimerStop(at, book = true) {
+  const t = S.time.ticket; if (!t) return 0;
+  S.time.ticket = null;
+  const min = Math.round(((at || Date.now()) - t.start) / 60000), it = S.items.find(i => i.id === t.itemId);
+  if (book && min >= 1 && it && it.jira) logTicketTime(it, min, '', S.settings.timeJira);
+  return min;
+}
+
+/* When did this PC session begin? The helper notices restarts and sleep; without it, the browser session counts. */
+let awakeCache = null, lastSync = 0;
+async function awakeSince(fresh) {
+  if (!SERVED) {
+    let t = null; try { t = +sessionStorage.getItem('fq-t0') || null; if (!t) { t = Date.now(); sessionStorage.setItem('fq-t0', String(t)); } } catch (e) { t = null; }
+    return t || (awakeCache = awakeCache || Date.now());
+  }
+  if (!fresh && awakeCache) return awakeCache;
+  try { const st = await api('GET', '/api/state'); const t = new Date(st.awakeSince).getTime(); awakeCache = isNaN(t) ? null : t; return awakeCache; }
+  catch (e) { return null; }
+}
+/* Runs at the start and every few seconds: keeps the running period alive, ends it after the PC was off or asleep,
+   and starts a new one when a new PC session began (if that is switched on). */
+async function timeSync() {
+  const T = S.time, now = Date.now();
+  const slept = !!lastSync && now - lastSync > GAP;         // this page was frozen or the PC slept
+  const first = !lastSync;
+  lastSync = now;
+  let changed = false, loud = false;
+  const gap = !!(T.open && T.beat && now - T.beat > GAP);
+  let awake = (gap || slept || first) ? await awakeSince(true) : await awakeSince(false);
+  if (awake === null) return;                               // helper not reachable: decide at the next round
+  if (gap && (!SERVED || awake > T.beat)) { timeStop(T.beat); changed = loud = true; }
+  if (T.open) { if (gap || now - T.beat >= 55000) { T.beat = now; changed = true; } }
+  else if (S.settings.timeAuto && T.autoFor !== String(awake)) {
+    T.autoFor = String(awake);
+    timeStart(Math.min(now, Math.max(awake, T.beat || 0)));
+    changed = loud = true;
+  }
+  if (changed) { save(loud ? undefined : { quiet: true }); renderClock(); }
 }
 
 /* ------------------------------------------------------------------ game */
@@ -418,11 +548,23 @@ async function jira(method, path, body) {
 }
 async function ensureMe() { if (!me) me = await jira('GET', 'rest/api/2/myself'); return me; }
 
-const ISSUE_FIELDS = 'summary,status,issuetype,assignee,reporter,creator,description,comment,parent';
+const ISSUE_FIELDS = 'summary,status,issuetype,assignee,reporter,creator,description,comment,parent,subtasks';
 const KEY_RE = /[A-Za-z][A-Za-z0-9_]+-\d+/g;
 
+/* a sub-ticket as the parent lists it. rel: 'sub' for a sub-task, 'epic' for a ticket inside an epic */
+function mapKid(x, rel) {
+  const f = x.fields || {};
+  return {
+    key: x.key, summary: f.summary || '', type: (f.issuetype && f.issuetype.name) || '', status: (f.status && f.status.name) || '',
+    statusCat: (f.status && f.status.statusCategory && f.status.statusCategory.key) || '', rel
+  };
+}
+const kids = j => (j && j.children) || [];
+const openKids = j => kids(j).filter(k => k.statusCat !== 'done');
+const isEpicType = t => /^(epic|epos)$/i.test(String(t || '').trim());
 function mapIssue(j) {
   const f = j.fields || {}, rf = j.renderedFields || {};
+  const pf = (f.parent && f.parent.fields) || {};
   const rc = (rf.comment && rf.comment.comments) || [];
   const comments = ((f.comment && f.comment.comments) || []).map((c, i) => ({
     id: c.id, author: (c.author && c.author.displayName) || 'Unknown', created: c.created,
@@ -436,10 +578,26 @@ function mapIssue(j) {
     assignee: f.assignee ? f.assignee.displayName : '', assigneeName: f.assignee ? (f.assignee.name || f.assignee.key || '') : '',
     author: ((f.reporter || f.creator || {}).displayName) || '',
     descHtml: rf.description ? rf.description : null, descText: f.description || '',
-    comments, parentKey: f.parent ? f.parent.key : '', fetchedAt: Date.now()
+    comments, parentKey: f.parent ? f.parent.key : '', parentType: (pf.issuetype && pf.issuetype.name) || '', parentSummary: pf.summary || '',
+    children: (f.subtasks || []).map(x => mapKid(x, 'sub')), fetchedAt: Date.now()
   };
 }
-const fetchIssue = async key => mapIssue(await jira('GET', `rest/api/2/issue/${encodeURIComponent(key)}?fields=${ISSUE_FIELDS}&expand=renderedFields`));
+/* the tickets that belong to an epic. Jira Data Center links them with the "Epic Link" field, newer versions with parent. */
+async function epicChildren(key) {
+  const run = jql => jira('POST', 'rest/api/2/search', { jql, fields: ['summary', 'status', 'issuetype'], maxResults: 200 });
+  let r;
+  try { r = await run(`"Epic Link" = ${key} ORDER BY key`); }
+  catch (e) { if (e.status !== 400) throw e; r = await run(`parent = ${key} ORDER BY key`); }
+  return (r.issues || []).map(x => mapKid(x, 'epic'));
+}
+async function fetchIssue(key) {
+  const j = mapIssue(await jira('GET', `rest/api/2/issue/${encodeURIComponent(key)}?fields=${ISSUE_FIELDS}&expand=renderedFields`));
+  if (isEpicType(j.type)) {
+    try { j.children = j.children.concat(await epicChildren(j.key)); }
+    catch (e) { j.kidsError = e.message; }
+  }
+  return j;
+}
 const ticketByKey = key => S.items.find(i => i.kind === 'ticket' && i.jira && i.jira.key === key);
 const browseUrl = key => `${meta.jira.baseUrl}/browse/${encodeURIComponent(key)}`;
 
@@ -471,15 +629,15 @@ function sanitize(html) {
 const textToHtml = t => esc(t).replace(/\r?\n/g, '<br>');
 const richHtml = (html, text) => html != null ? sanitize(html) : textToHtml(text || '');
 
-/* names of the ticket types a project offers */
+/* the ticket types a project offers */
 async function projectTypes(project) {
   const p = encodeURIComponent(project);
   try {
     const r = await jira('GET', `rest/api/2/issue/createmeta/${p}/issuetypes?maxResults=200`);
-    return (r.values || r.issueTypes || []).map(x => x.name);
+    return (r.values || r.issueTypes || []).map(x => ({ name: x.name, subtask: !!x.subtask }));
   } catch (e) { if (e.status !== 404 && e.status !== 405) throw e; }
   const r = await jira('GET', `rest/api/2/project/${p}`);
-  return (r.issueTypes || []).map(x => x.name);
+  return (r.issueTypes || []).map(x => ({ name: x.name, subtask: !!x.subtask }));
 }
 /* create-screen metadata: Jira 9+ first, older endpoint as fallback */
 async function createMeta(project, typeName) {
