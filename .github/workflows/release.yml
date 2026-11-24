@@ -35,11 +35,11 @@ jobs:
       - name: Build app.html and the browser version
         run: node dev/build.js --web
 
-      - name: Test the browser version
+      - name: Browser tests
         run: |
           npm install --no-save playwright@1
           npx playwright install --with-deps chromium
-          node dev/test-web.js
+          node dev/run-tests.js
 
       - uses: actions/upload-pages-artifact@v3
         with:
@@ -81,16 +81,44 @@ jobs:
           name: release
           path: dist
 
-      - name: Install from the zip
+      # Company PCs often set the execution policy RemoteSigned by group policy. It overrides the
+      # "-ExecutionPolicy Bypass" of the launchers: scripts marked as downloaded do not run.
+      - name: Set the machine policy RemoteSigned
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $key = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell'
+          New-Item -Path $key -Force | Out-Null
+          Set-ItemProperty -Path $key -Name EnableScripts -Value 1 -Type DWord
+          Set-ItemProperty -Path $key -Name ExecutionPolicy -Value 'RemoteSigned' -Type String
+          $p = & powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Get-ExecutionPolicy"
+          if ($p -ne 'RemoteSigned') { throw "policy is $p" }
+
+      - name: Zip not unblocked - installer does not run and says what to do
         run: |
           $ErrorActionPreference = 'Stop'
           $zip = (Get-ChildItem dist\*.zip)[0].FullName
           Expand-Archive -LiteralPath $zip -DestinationPath extracted
           $src = Join-Path (Resolve-Path extracted) 'FocusQuest'
+          # Explorer copies the "downloaded" mark of a zip file to every file it extracts.
+          Get-ChildItem -LiteralPath $src -File | ForEach-Object { Set-Content -LiteralPath $_.FullName -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3" }
+          $t = Join-Path $env:RUNNER_TEMP 'fq-blocked'
+          $out = (cmd /c "$src\Install-FocusQuest.cmd -TargetDir $t -NoShortcut -NoStart < nul 2>&1") | Out-String
+          Write-Host $out
+          if (Test-Path -LiteralPath (Join-Path $t 'app.html')) { throw 'blocked installer installed anyway' }
+          if ($out -notmatch 'not digitally signed') { throw 'expected the signing error' }
+          if ($out -notmatch 'Unblock') { throw 'hint about unblocking is missing' }
+          # Unblocking the zip file before extracting leaves no mark on the files.
+          Get-ChildItem -LiteralPath $src -File | Unblock-File
+
+      - name: Install from the unblocked zip
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = Join-Path (Resolve-Path extracted) 'FocusQuest'
           $target = Join-Path $env:LOCALAPPDATA 'FocusQuest'
 
-          & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$src\install.ps1" -NoStart
-          if ($LASTEXITCODE -ne 0) { throw "installer exited with $LASTEXITCODE" }
+          $out = (cmd /c "$src\Install-FocusQuest.cmd -NoStart < nul 2>&1") | Out-String
+          Write-Host $out
+          if ($out -notmatch 'FocusQuest is installed in') { throw 'installer did not finish' }
 
           foreach ($f in 'app.html','server.ps1','Start-FocusQuest.cmd','README.txt','LICENSE.txt','version.txt') {
             if (-not (Test-Path -LiteralPath (Join-Path $target $f))) { throw "$f was not installed" }
@@ -185,13 +213,14 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           cat > notes.md <<'NOTES'
-          **Install:** download `FocusQuest-VERSION.zip`, extract it, and double-click `Install-FocusQuest.cmd`. No admin rights needed.
+          **Install**
+          1. Download `FocusQuest-VERSION.zip`.
+          2. Right-click the zip file, choose Properties, tick "Unblock" ("Zulassen") and click OK.
+          3. Extract it and double-click `Install-FocusQuest.cmd`. No admin rights needed.
 
-          **Update:** do the same again. Your data in the `data` folder is kept.
+          **Update:** close the helper window and do the same again. Your data in the `data` folder is kept.
 
-          If Windows warns about the downloaded files: right-click the zip file, choose Properties, tick "Unblock", then extract.
-
-          **PC only runs signed PowerShell scripts?** Use the browser version at https://infpowertower.github.io/focusquest/ (to-dos only, no Jira), or double-click `app.html` from the zip.
+          If the PC only runs signed PowerShell scripts even after unblocking, double-click `app.html` from the zip (to-dos only, no Jira).
           NOTES
           sed -i "s/^ *//; s/VERSION/$VERSION/" notes.md
           gh release create "v$VERSION" dist/* \

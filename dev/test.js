@@ -1,17 +1,21 @@
 const { chromium } = require('playwright');
 const assert = require('assert');
+const PORT = +process.env.FQ_PORT || 8765, JPORT = +process.env.FQ_JIRA_PORT || 8799;
 (async () => {
-  const browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', args: ['--no-sandbox'] });
+  const browser = await chromium.launch();
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, permissions: ['notifications'] });
   const page = await ctx.newPage();
   const errors = [];
   page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
   page.on('pageerror', e => errors.push('PAGEERROR ' + e.message));
-  const shot = n => page.screenshot({ path: `/tmp/shot-${n}.png` });
-  const step = async (name, fn) => { try { await fn(); console.log('ok  ', name); } catch (e) { console.log('FAIL', name, '\n     ', e.message.split('\n')[0]); await shot('fail-' + name.replace(/\W+/g, '_')); } };
+  const dataFile = process.env.FQ_DATA || __dirname + '/data.json';
+  // screenshots only when FQ_SHOTS names a folder
+  const shot = n => process.env.FQ_SHOTS ? page.screenshot({ path: `${process.env.FQ_SHOTS}/shot-${n}.png` }) : null;
+  let failed = 0;
+  const step = async (name, fn) => { try { await fn(); console.log('ok  ', name); } catch (e) { failed++; console.log('FAIL', name, '\n     ', e.message.split('\n')[0]); await shot('fail-' + name.replace(/\W+/g, '_')); } };
   const xp = () => page.evaluate(() => S.game.xp);
 
-  await page.goto('http://localhost:8765/');
+  await page.goto(`http://localhost:${PORT}/`);
   await page.evaluate(() => { Math.random = () => 0.5; });   // no lucky doubles, so XP is predictable
   await step('loads', async () => { await page.waitForSelector('#q'); assert.equal(await page.textContent('#p-lvl'), '1'); });
   await shot('01-empty');
@@ -37,7 +41,9 @@ const assert = require('assert');
     await page.click('[data-tab=open]');
     await page.click('.item:has-text("Tidy up") .check');
     await page.waitForTimeout(600);
-    assert.equal(await page.textContent('#p-done'), '1 of 3');
+    assert.equal(await page.textContent('#p-closed'), '1');
+    assert.equal(await page.textContent('#p-created'), '4');
+    assert.equal(await page.textContent('#p-comments'), '0');
   });
   await step('drawer: steps, due chips, reminder', async () => {
     await page.click('.item:has-text("Call vendor") .ibody');
@@ -59,7 +65,7 @@ const assert = require('assert');
 
   await step('connect Jira', async () => {
     await page.click('[data-view=settings]');
-    await page.fill('#j-url', 'http://localhost:8799/'); await page.fill('#j-tok', 'wrong');
+    await page.fill('#j-url', `http://localhost:${JPORT}/`); await page.fill('#j-tok', 'wrong');
     await page.click('[data-act=jira-save]');
     await page.waitForSelector('#j-msg .err');
     assert.match(await page.textContent('#j-msg'), /did not accept the token/);
@@ -68,20 +74,44 @@ const assert = require('assert');
     assert.match(await page.textContent('#j-msg'), /Alex Brandt/);
     assert.match(await page.textContent('#railfoot'), /Jira connected as Alex Brandt/);
   });
-  await step('ticket setup: project, pick components from Jira', async () => {
-    await page.fill('#c-proj', 'ops'); await page.locator('#c-proj').blur();
+  await step('ticket setup: project, pick type and components from Jira', async () => {
+    await page.fill('#fm-project', 'ops'); await page.locator('#fm-project').blur();
+    await page.waitForFunction(() => S.ticketCfg.forms[0].project === 'OPS');
+    await page.click('[data-act=form-types]');
+    await page.check('.picklist label:has-text("Story") input');
+    await page.click('#ft-ok');
+    assert.equal(await page.evaluate(() => S.ticketCfg.forms[0].type), 'Story');
+    await page.fill('#fm-type', 'Task'); await page.locator('#fm-type').blur();
+    await page.waitForFunction(() => S.ticketCfg.forms[0].type === 'Task');
     await page.click('[data-act=fld-pick]');
     await page.waitForSelector('#pk-filter');
     for (const n of ['Dispatch', 'Mail', 'Onboarding']) await page.check(`.picklist label:has-text("${n}") input`);
     await page.click('#pk-ok');
-    assert.deepEqual(await page.evaluate(() => S.ticketCfg.fields[0].values), ['Dispatch', 'Mail', 'Onboarding']);
+    assert.deepEqual(await page.evaluate(() => S.ticketCfg.forms[0].fields[0].values), ['Dispatch', 'Mail', 'Onboarding']);
     await page.click('[data-act=fld-browse]');
     await page.waitForSelector('#fb-list .picklist');
     await page.click('#fb-list .pick:has-text("Site") button');
     await page.click('.overlay [data-act=modal-close]');
-    const f = await page.evaluate(() => S.ticketCfg.fields[1]);
+    const f = await page.evaluate(() => S.ticketCfg.forms[0].fields[1]);
     assert.equal(f.fieldId, 'customfield_10042'); assert.equal(f.kind, 'single-option'); assert.deepEqual(f.values, ['Berlin', 'Hamburg', 'Leipzig']);
   });
+  await step('several forms: copy for another type, new form for another project', async () => {
+    await page.click('[data-act=form-dup]');
+    await page.fill('#fm-name', 'Service request'); await page.locator('#fm-name').blur();
+    await page.fill('#fm-type', 'Service Request'); await page.locator('#fm-type').blur();
+    await page.waitForFunction(() => S.ticketCfg.forms.length === 2 && S.ticketCfg.forms[1].type === 'Service Request');
+    await page.click('[data-act=form-add]');
+    await page.fill('#fm-project', 'hr'); await page.locator('#fm-project').blur();
+    await page.waitForFunction(() => S.ticketCfg.forms.length === 3 && S.ticketCfg.forms[2].project === 'HR');
+    const c = await page.evaluate(() => S.ticketCfg);
+    assert.equal(c.forms[1].fields.length, 2, 'copy keeps the fields'); assert.equal(c.forms[2].fields.length, 0);
+    assert.equal(c.defaultForm, c.forms[0].id);
+    assert.match(await page.textContent('#form-tabs'), /Task in OPS\s*default.*Service request.*Task in HR/s);
+    // switching the edited form shows its own values
+    await page.check('#form-tabs label:has-text("Service request") input');
+    assert.equal(await page.inputValue('#fm-type'), 'Service Request');
+  });
+  await shot('03b-forms');
   await shot('03-settings');
 
   await step('import: assigned to me + by key', async () => {
@@ -95,7 +125,7 @@ const assert = require('assert');
     await page.waitForSelector('.item .key');
     assert.equal(await page.evaluate(() => S.items.filter(i => i.kind === 'ticket').length), 4);
     await page.click('[data-act=import]');
-    await page.fill('#imp-keys', 'http://localhost:8799/browse/OPS-105, ops-999');
+    await page.fill('#imp-keys', `http://localhost:${JPORT}/browse/OPS-105, ops-999`);
     await page.click('[data-act=imp-keys]');
     await page.waitForSelector('#imp-err .err');
     assert.match(await page.textContent('#imp-err'), /Imported OPS-105.*OPS-999/);
@@ -109,7 +139,7 @@ const assert = require('assert');
     assert.ok(!/<script|onerror|javascript:/i.test(html), 'unsafe html leaked');
     assert.equal(await page.evaluate(() => window.__xss), undefined);
     assert.match(await page.textContent('.facts'), /Assignee\s*Alex Brandt\s*Author\s*Priya Nair/);
-    assert.match(await page.getAttribute('.rich a[href*="OPS-101"]', 'href'), /^http:\/\/localhost:8799\/browse\/OPS-101$/);
+    assert.match(await page.getAttribute('.rich a[href*="OPS-101"]', 'href'), new RegExp(`^http://localhost:${JPORT}/browse/OPS-101$`));
   });
   await step('comment', async () => {
     const before = await xp();
@@ -148,19 +178,26 @@ const assert = require('assert');
     await page.waitForSelector('#tf-summary');
     assert.equal(await page.inputValue('#tf-summary'), 'Call vendor about the invoice');
     assert.match(await page.inputValue('#tf-desc'), /Invoice 4471[\s\S]*\* Find the invoice number/);
-    assert.equal(await page.inputValue('#tf-project'), 'OPS');
+    assert.match(await page.textContent('#tf-where'), /Creates a Task in OPS/);
     await page.click('[data-act=tf-create]');
     assert.match(await page.textContent('#tf-err'), /Components is required/);
+    await page.selectOption('#tf-form', { label: 'Task in HR' });
+    assert.match(await page.textContent('#tf-where'), /Creates a Task in HR/);
+    assert.equal(await page.locator('.modal [data-f]').count(), 0, 'HR form has no extra fields');
+    await page.selectOption('#tf-form', { label: 'Service request' });
+    assert.match(await page.textContent('#tf-where'), /Creates a Service Request in OPS/);
+    assert.equal(await page.inputValue('#tf-summary'), 'Call vendor about the invoice', 'text survives a form change');
     await page.check('.modal label.chip:has-text("Dispatch") input');
-    await page.selectOption('#tf-type', 'Service Request');
-    assert.ok(await page.isChecked('.modal label.chip:has-text("Dispatch") input'), 'selection lost on type change');
     await page.selectOption('[data-f]:is(select)', 'Hamburg');
     await page.click('[data-act=tf-as-tpl]');
     await page.fill('#tf-name', 'Vendor request');
     await page.fill('#tf-summary', 'Vendor: {title}');
     await page.click('[data-act=tf-save]');
     await page.waitForSelector('#tf-tpl');
+    await page.selectOption('#tf-form', { label: 'Task in HR' });
     await page.selectOption('#tf-tpl', { label: 'Vendor request' });
+    assert.equal(await page.inputValue('#tf-form'), await page.evaluate(() => S.ticketCfg.forms[1].id), 'template brings its form');
+    assert.ok(await page.isChecked('.modal label.chip:has-text("Dispatch") input'), 'template fills the fields');
     assert.equal(await page.inputValue('#tf-summary'), 'Vendor: Call vendor about the invoice');
     await shot('08-create-ticket');
     await page.click('[data-act=tf-create]');
@@ -168,9 +205,23 @@ const assert = require('assert');
     const it = await page.evaluate(() => S.items[0]);
     assert.equal(it.kind, 'ticket'); assert.equal(it.prio, 1); assert.match(it.jira.key, /^OPS-2/); assert.equal(it.jira.type, 'Service Request');
   });
+  await step('ticket in a second project', async () => {
+    await page.click('[data-act=close-drawer]');
+    await page.click('[data-act=new-ticket]');
+    await page.waitForSelector('#tf-summary');
+    await page.selectOption('#tf-form', { label: 'Task in HR' });
+    await page.fill('#tf-summary', 'Update the leave policy page');
+    await page.click('[data-act=tf-create]');
+    await page.waitForSelector('#drawer .key:has-text("HR-")');
+    const it = await page.evaluate(() => S.items[S.items.length - 1]);
+    assert.match(it.jira.key, /^HR-2/); assert.equal(it.jira.type, 'Task');
+    const st = await page.evaluate(() => statsOf(dayRec().n));
+    assert.deepEqual(st, { created: 6, closed: 2, comments: 2 });
+    assert.equal(await page.textContent('#p-comments'), '2');
+  });
   await step('refresh shows activity by others', async () => {
     await page.click('[data-act=close-drawer]');
-    await fetch('http://localhost:8800/');
+    await fetch(`http://localhost:${JPORT + 1}/`);
     await page.click('#refall');
     await page.waitForSelector('.item:has-text("mailbox quota") .fresh');
   });
@@ -179,8 +230,8 @@ const assert = require('assert');
     const n = await page.evaluate(() => S.items.length), x = await xp();
     await page.reload(); await page.waitForSelector('#q');
     assert.equal(await page.evaluate(() => S.items.length), n); assert.equal(await xp(), x);
-    assert.ok(require('fs').existsSync(__dirname + '/data.json'));
-    const raw = require('fs').readFileSync(__dirname + '/data.json', 'utf8');
+    assert.ok(require('fs').existsSync(dataFile));
+    const raw = require('fs').readFileSync(dataFile, 'utf8');
     assert.ok(!raw.includes('testtoken'), 'token must not be in the data file');
   });
   await shot('09-board-full');
@@ -190,4 +241,5 @@ const assert = require('assert');
   await page.setViewportSize({ width: 420, height: 800 }); await page.click('[data-act=close-drawer]'); await shot('12-mobile');
   console.log('console errors:', errors.length ? errors : 'none');
   await browser.close();
+  if (failed) { console.log(failed + ' step(s) failed'); process.exit(1); }
 })().catch(e => { console.error('CRASH', e); process.exit(1); });

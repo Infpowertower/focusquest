@@ -1,7 +1,7 @@
 // Test stand-in for server.ps1 (same routes) plus a mock Jira Data Center. Not shipped.
 const http = require('http'), fs = require('fs'), path = require('path');
-const PORT = 8765, JPORT = 8799, SECRET = 'devsecret', TOKEN = 'testtoken';
-const root = path.join(__dirname, '..'), dataFile = path.join(__dirname, 'data.json');
+const PORT = +process.env.FQ_PORT || 8765, JPORT = +process.env.FQ_JIRA_PORT || 8799, SECRET = 'devsecret', TOKEN = 'testtoken';
+const root = path.join(__dirname, '..'), dataFile = process.env.FQ_DATA || path.join(__dirname, 'data.json');
 let cfg = { baseUrl: '', token: '' };
 const body = req => new Promise(r => { let b = ''; req.on('data', c => b += c); req.on('end', () => r(b)); });
 const send = (res, s, o, ct) => { const t = typeof o === 'string' ? o : JSON.stringify(o); res.writeHead(s, { 'Content-Type': ct || 'application/json; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(s === 204 ? undefined : t); };
@@ -60,14 +60,14 @@ http.createServer(async (req, res) => {
   let m;
   if (p === '/rest/api/2/myself') return send(res, 200, ME);
   if (p === '/rest/api/2/search') { const list = Object.values(issues).filter(i => i.assignee && i.assignee.name === ME.name && i.st !== 'done'); return send(res, 200, { total: list.length, issues: list.map(i => out(i)) }); }
-  if ((m = /^\/rest\/api\/2\/issue\/createmeta\/(\w+)\/issuetypes$/.exec(p))) return m[1] === 'OPS' ? send(res, 200, { values: ['Service Request', 'Task', 'Story', 'Sub-task'].map((n, i) => ({ id: String(10 + i), name: n })) }) : send(res, 404, { errorMessages: ['No project'] });
+  if ((m = /^\/rest\/api\/2\/issue\/createmeta\/(\w+)\/issuetypes$/.exec(p))) return (m[1] === 'OPS' || m[1] === 'HR') ? send(res, 200, { values: ['Service Request', 'Task', 'Story', 'Sub-task'].map((n, i) => ({ id: String(10 + i), name: n })) }) : send(res, 404, { errorMessages: ['No project'] });
   if ((m = /^\/rest\/api\/2\/issue\/createmeta\/(\w+)\/issuetypes\/(\d+)$/.exec(p))) return send(res, 200, { isLast: true, values: metaFields });
   if (p === '/rest/api/2/issue' && req.method === 'POST') {
     const f = j.fields; const errors = {};
-    if (!f.components || !f.components.length) errors.components = 'Component/s is required.';
-    if (f.project.key !== 'OPS') return send(res, 400, { errorMessages: ['project is required'], errors: {} });
+    if (f.project.key === 'OPS' && (!f.components || !f.components.length)) errors.components = 'Component/s is required.';
+    if (f.project.key !== 'OPS' && f.project.key !== 'HR') return send(res, 400, { errorMessages: ['project is required'], errors: {} });
     if (Object.keys(errors).length) return send(res, 400, { errorMessages: [], errors });
-    const key = 'OPS-' + (200 + Object.keys(issues).length);
+    const key = f.project.key + '-' + (200 + Object.keys(issues).length);
     const i = mk(key, f.issuetype.name, f.summary, 'open', f.assignee ? ME : null, ME, f.description || '');
     i.created = f; if (f.parent) i.parent = f.parent.key;
     return send(res, 201, { id: i.id, key });

@@ -3,12 +3,12 @@ rem Copies FocusQuest into your user profile and adds a Start menu entry. Needs 
 powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File "%~dp0install.ps1" %*
 if not errorlevel 1 goto end
 echo.
-echo If the message above says the script is not digitally signed, this PC only runs
-echo signed PowerShell scripts. FocusQuest can then not be installed or started this way.
-echo Use the browser version instead. To-dos work there, Jira does not:
-echo   https://infpowertower.github.io/focusquest/
-echo   or double-click app.html in this folder.
-echo README.txt explains the details.
+echo If the message above says the script is not digitally signed:
+echo Windows blocks scripts from a downloaded zip file until you unblock the zip file.
+echo   1. Right-click the downloaded zip file and choose Properties.
+echo   2. Tick "Unblock" [German: "Zulassen"] at the bottom and click OK.
+echo   3. Extract the zip file again and start Install-FocusQuest.cmd from the new folder.
+echo This is needed for every new version you download. README.txt explains the details.
 :end
 echo.
 pause

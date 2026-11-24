@@ -17,7 +17,7 @@ function applyTheme() {
 /* ------------------------------------------------------------------ rail */
 function renderPlayer(bump) {
   const g = S.game, l = levelOf(g.xp), a = needXp(l), b = needXp(l + 1), pct = Math.round((g.xp - a) / (b - a) * 100);
-  const d = dayRec(), goal = Math.max(1, S.settings.dailyGoal), st = streakNow();
+  const t = statsOf(dayRec().n), st = streakNow();
   const box = $('#player');
   if (!$('#p-lvl')) {
     box.innerHTML = `<div class="player">
@@ -27,7 +27,9 @@ function renderPlayer(bump) {
         <div class="xpnum"><span id="p-xp"></span><span id="p-next"></span></div>
       </div>
       <div class="duo" style="margin-top:10px">
-        <div class="stat"><b id="p-done"></b><span>done today</span><div class="goal-dots" id="p-dots"></div></div>
+        <div class="stat"><b id="p-created"></b><span>created today</span></div>
+        <div class="stat"><b id="p-closed"></b><span>closed today</span></div>
+        <div class="stat"><b id="p-comments"></b><span>comments today</span></div>
         <div class="stat"><b id="p-streak"></b><span>workday streak</span></div>
       </div>`;
   }
@@ -37,8 +39,9 @@ function renderPlayer(bump) {
   $('#p-bar i').style.width = pct + '%';
   $('#p-xp').textContent = `${g.xp} XP`;
   $('#p-next').textContent = `${b - g.xp} to level ${l + 1}`;
-  $('#p-done').textContent = `${d.done} of ${goal}`;
-  $('#p-dots').innerHTML = Array.from({ length: Math.min(goal, 12) }, (_, i) => `<i class="${i < d.done ? 'on' : ''}"></i>`).join('');
+  $('#p-created').textContent = t.created;
+  $('#p-closed').textContent = t.closed;
+  $('#p-comments').textContent = t.comments;
   $('#p-streak').textContent = st + (st > 0 ? ' 🔥' : '');
   if (bump && motionOk()) { const x = $('#p-xp'); x.classList.remove('bump'); void x.offsetWidth; x.classList.add('bump'); }
 }
@@ -563,7 +566,6 @@ function celebrateClose(it) {
 }
 
 /* ------------------------------------------------------------------ Jira: create ticket (with defaults, templates, own fields) */
-const fieldsFor = type => S.ticketCfg.fields.filter(f => !f.types || !f.types.length || f.types.some(t => t.toLowerCase() === String(type).toLowerCase()));
 const tplById = id => S.ticketCfg.templates.find(t => t.id === id);
 const normVal = (f, v) => isMulti(f.kind) ? (Array.isArray(v) ? v.slice() : splitList(v)) : (Array.isArray(v) ? (v[0] || '') : String(v == null ? '' : v));
 const isSub = type => /sub/i.test(type || '');
@@ -573,16 +575,18 @@ function todoDescription(todo) {
   if (todo.steps && todo.steps.length) parts.push(todo.steps.map(s => `* ${s.text}`).join('\n'));
   return parts.join('\n\n');
 }
+function tfDefaults(form) { TF.fields = {}; for (const f of form.fields) TF.fields[f.uid] = normVal(f, f.def); }
 function openTicketForm(o = {}) {
-  const c = S.ticketCfg, isT = o.mode === 'template';
+  const isT = o.mode === 'template';
   if (!isT && !requireJira()) return;
-  TF = { mode: isT ? 'template' : 'create', todoId: o.todoId || null, tplId: o.tplId || '', name: '', project: c.project, type: c.types.includes(c.defaultType) ? c.defaultType : (c.types[0] || 'Task'), parent: '', summary: '', description: '', fields: {}, assignToMe: !!c.assignToMe, keep: true, fromCreate: false };
-  for (const f of c.fields) TF.fields[f.uid] = normVal(f, f.def);
+  const t = o.tplId ? tplById(o.tplId) : null;
+  const form = (t && formById(t.formId)) || defForm();
+  TF = { mode: isT ? 'template' : 'create', todoId: o.todoId || null, tplId: o.tplId || '', name: '', formId: form.id, project: form.project, parent: '', summary: '', description: '', fields: {}, assignToMe: !!form.assignToMe, keep: true, fromCreate: false };
+  tfDefaults(form);
   const todo = TF.todoId ? byId(TF.todoId) : null;
-  if (isT && o.tplId) {
-    const t = tplById(o.tplId);
-    Object.assign(TF, { name: t.name, project: t.project, type: t.type, summary: t.summary, description: t.description, assignToMe: !!t.assignToMe });
-    for (const f of c.fields) if (t.fields && t.fields[f.uid] !== undefined) TF.fields[f.uid] = normVal(f, t.fields[f.uid]);
+  if (isT && t) {
+    Object.assign(TF, { name: t.name, summary: t.summary, description: t.description, assignToMe: !!t.assignToMe });
+    for (const f of form.fields) if (t.fields && t.fields[f.uid] !== undefined) TF.fields[f.uid] = normVal(f, t.fields[f.uid]);
   } else if (todo) { TF.summary = todo.title; TF.description = todoDescription(todo); }
   TF.w = modal('', 'wide');
   tfRender();
@@ -602,20 +606,20 @@ function tfField(f) {
 }
 function tfRender() {
   const c = S.ticketCfg, isT = TF.mode === 'template', todo = TF.todoId ? byId(TF.todoId) : null;
-  const types = c.types.includes(TF.type) ? c.types : [TF.type, ...c.types];
+  const form = formById(TF.formId) || defForm();
   $('.modal', TF.w).innerHTML = `
     <h2>${isT ? (TF.tplId && !TF.fromCreate ? 'Edit template' : 'New template') : 'Create Jira ticket'}</h2>
     ${isT ? `<p class="lead">A template pre-fills the ticket form. Write {title} or {notes} where the title and notes of the to-do should go.</p>
         <label class="f" for="tf-name">Template name</label><input type="text" id="tf-name" value="${esc(TF.name)}" placeholder="For example: Access request" autofocus>`
       : c.templates.length ? `<label class="f" for="tf-tpl">Template</label><select id="tf-tpl" data-ch="tf-tpl"><option value="">No template, use my defaults</option>${c.templates.map(t => `<option value="${t.id}" ${t.id === TF.tplId ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>` : ''}
-    <div class="grid2">
-      <div><label class="f" for="tf-project">Project key</label><input type="text" id="tf-project" value="${esc(TF.project)}" placeholder="For example: OPS"></div>
-      <div><label class="f" for="tf-type">Ticket type</label><select id="tf-type" data-ch="tf-type">${types.map(t => `<option ${t === TF.type ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
-    </div>
-    ${isSub(TF.type) ? `<label class="f" for="tf-parent">Parent ticket key</label><input type="text" id="tf-parent" value="${esc(TF.parent)}" placeholder="For example: OPS-123">` : ''}
+    ${c.forms.length > 1 ? `<label class="f" for="tf-form">Ticket form</label><select id="tf-form" data-ch="tf-form">${c.forms.map(f => `<option value="${f.id}" ${f.id === form.id ? 'selected' : ''}>${esc(formLabel(f))}</option>`).join('')}</select>` : ''}
+    ${form.project ? `<p class="help" id="tf-where">${isT ? 'For' : 'Creates'} a ${esc(form.type)} in ${esc(form.project)}.</p>`
+      : isT ? `<p class="help" id="tf-where">For a ${esc(form.type)}. This form has no project key yet.</p>`
+      : `<label class="f" for="tf-project">Project key <small>for a ${esc(form.type)}. It is saved in the form.</small></label><input type="text" id="tf-project" value="${esc(TF.project)}" placeholder="For example: OPS">`}
+    ${isSub(form.type) ? `<label class="f" for="tf-parent">Parent ticket key</label><input type="text" id="tf-parent" value="${esc(TF.parent)}" placeholder="For example: OPS-123">` : ''}
     <label class="f" for="tf-summary">Summary</label><input type="text" id="tf-summary" value="${esc(TF.summary)}">
     <label class="f" for="tf-desc">Description</label><textarea id="tf-desc" rows="6">${esc(TF.description)}</textarea>
-    ${fieldsFor(TF.type).map(tfField).join('')}
+    ${form.fields.map(tfField).join('')}
     <div class="chips" style="margin-top:16px">
       <label class="chip"><input type="checkbox" id="tf-assign" ${TF.assignToMe ? 'checked' : ''}> Assign to me</label>
       ${todo && !isT ? `<label class="chip"><input type="checkbox" id="tf-keep" ${TF.keep ? 'checked' : ''}> Turn the to-do into this ticket</label>` : ''}
@@ -628,34 +632,43 @@ function tfRender() {
     </div>`;
 }
 function tfCollect() {
-  const w = TF.w, g = id => $('#' + id, w);
-  for (const f of fieldsFor(TF.type)) {
+  const w = TF.w, g = id => $('#' + id, w), form = formById(TF.formId) || defForm();
+  for (const f of form.fields) {
     const el = $(`[data-f="${f.uid}"]`, w); if (!el) continue;
     TF.fields[f.uid] = isMulti(f.kind) ? (el.tagName === 'DIV' ? $$('input:checked', el).map(x => x.value) : splitList(el.value)) : el.value.trim();
   }
   if (g('tf-name')) TF.name = g('tf-name').value.trim();
-  TF.project = g('tf-project').value.trim().toUpperCase();
-  TF.type = g('tf-type').value;
+  if (g('tf-project')) TF.project = g('tf-project').value.trim().toUpperCase();
   if (g('tf-parent')) TF.parent = g('tf-parent').value.trim().toUpperCase();
   TF.summary = g('tf-summary').value.trim();
   TF.description = g('tf-desc').value;
   TF.assignToMe = g('tf-assign').checked;
   if (g('tf-keep')) TF.keep = g('tf-keep').checked;
 }
+/* another form was chosen: its project, type and fields replace the current ones, the text stays */
+function tfSetForm(id) {
+  const form = formById(id); if (!form) return;
+  TF.formId = form.id; TF.project = form.project; TF.assignToMe = !!form.assignToMe;
+  if (TF.mode === 'create') TF.tplId = '';
+  tfDefaults(form);
+  tfRender();
+}
 function tfApplyTemplate(id) {
-  const c = S.ticketCfg, t = tplById(id), todo = TF.todoId ? byId(TF.todoId) : null;
+  const t = tplById(id), todo = TF.todoId ? byId(TF.todoId) : null;
   TF.tplId = id;
+  const form = (t && formById(t.formId)) || formById(TF.formId) || defForm();
   const title = todo ? todo.title : '', notes = todo ? todoDescription(todo) : '';
+  TF.formId = form.id; TF.project = form.project;
+  tfDefaults(form);
   if (!t) {
-    TF.project = c.project; TF.type = c.defaultType; TF.assignToMe = !!c.assignToMe;
+    TF.assignToMe = !!form.assignToMe;
     TF.summary = title; TF.description = notes;
-    for (const f of c.fields) TF.fields[f.uid] = normVal(f, f.def);
   } else {
-    TF.project = t.project || c.project; TF.type = t.type || TF.type; TF.assignToMe = !!t.assignToMe;
+    TF.assignToMe = !!t.assignToMe;
     const fill = s => String(s || '').split('{title}').join(title).split('{notes}').join(notes);
     TF.summary = t.summary ? fill(t.summary).trim() : title;
     TF.description = t.description ? fill(t.description) : notes;
-    for (const f of c.fields) TF.fields[f.uid] = normVal(f, t.fields && t.fields[f.uid] !== undefined ? t.fields[f.uid] : f.def);
+    for (const f of form.fields) if (t.fields && t.fields[f.uid] !== undefined) TF.fields[f.uid] = normVal(f, t.fields[f.uid]);
   }
   tfRender();
 }
@@ -664,7 +677,7 @@ function tfSaveTemplate() {
   if (!TF.name) { showErr('#tf-err', 'Give the template a name.', TF.w); return; }
   const c = S.ticketCfg, editing = TF.tplId && !TF.fromCreate ? tplById(TF.tplId) : null;
   const t = editing || { id: 't_' + uid() };
-  Object.assign(t, { name: TF.name, project: TF.project, type: TF.type, summary: TF.summary, description: TF.description, assignToMe: TF.assignToMe, fields: clone(TF.fields) });
+  Object.assign(t, { name: TF.name, formId: TF.formId, summary: TF.summary, description: TF.description, assignToMe: TF.assignToMe, fields: clone(TF.fields) });
   if (!editing) c.templates.push(t);
   save();
   toast(`Template "${t.name}" saved.`);
@@ -673,15 +686,16 @@ function tfSaveTemplate() {
 }
 async function tfCreate(btn) {
   tfCollect();
-  const errs = [], sub = isSub(TF.type);
-  if (!TF.project) errs.push('Enter the project key.');
+  const form = formById(TF.formId) || defForm(), project = form.project || TF.project, type = form.type;
+  const errs = [], sub = isSub(type);
+  if (!project) errs.push('Enter the project key.');
   if (!TF.summary) errs.push('Enter a summary.');
   if (sub && !TF.parent) errs.push('A sub-task needs the key of its parent ticket.');
-  const fields = { project: { key: TF.project }, issuetype: { name: TF.type }, summary: TF.summary };
+  const fields = { project: { key: project }, issuetype: { name: type }, summary: TF.summary };
   if (TF.description.trim()) fields.description = TF.description;
   if (sub && TF.parent) fields.parent = { key: TF.parent };
-  for (const f of fieldsFor(TF.type)) {
-    const v = TF.fields[f.uid], empty = isMulti(f.kind) ? !v.length : !v;
+  for (const f of form.fields) {
+    const v = TF.fields[f.uid] === undefined ? normVal(f, f.def) : TF.fields[f.uid], empty = isMulti(f.kind) ? !v.length : !v;
     if (empty) { if (f.required) errs.push(`${f.label || f.fieldId} is required.`); continue; }
     if (f.fieldId) fields[f.fieldId] = fieldPayload(f, v);
   }
@@ -692,10 +706,10 @@ async function tfCreate(btn) {
     if (TF.assignToMe) { const u = await ensureMe(); fields.assignee = { name: u.name }; }
     r = await jira('POST', 'rest/api/2/issue', { fields });
   } catch (e) { busy(btn, false); showErr('#tf-err', e.message, TF.w); return; }
-  if (!S.ticketCfg.project) S.ticketCfg.project = TF.project;
+  if (!form.project) form.project = project;
   let j;
   try { j = await fetchIssue(r.key); }
-  catch (e) { j = { key: r.key, id: r.id, summary: TF.summary, type: TF.type, subtask: sub, status: 'Created', statusCat: 'new', assignee: '', assigneeName: '', author: '', descHtml: null, descText: TF.description, comments: [], parentKey: TF.parent, fetchedAt: Date.now(), error: e.message }; }
+  catch (e) { j = { key: r.key, id: r.id, summary: TF.summary, type, subtask: sub, status: 'Created', statusCat: 'new', assignee: '', assigneeName: '', author: '', descHtml: null, descText: TF.description, comments: [], parentKey: TF.parent, fetchedAt: Date.now(), error: e.message }; }
   const todo = TF.todoId ? byId(TF.todoId) : null;
   let it;
   if (todo && TF.keep) { it = todo; it.kind = 'ticket'; it.jira = j; it.title = j.summary; }
@@ -708,18 +722,27 @@ async function tfCreate(btn) {
 }
 
 /* ------------------------------------------------------------------ rewards view */
+const nOf = (n, word) => `${n || 0} ${word}${n === 1 ? '' : 's'}`;
 function renderRewards() {
-  const g = S.game, l = levelOf(g.xp), d = dayRec();
+  const g = S.game, l = levelOf(g.xp), d = dayRec(), td = statsOf(d.n), all = statsOf(g.counts);
   const days = Array.from({ length: 14 }, (_, i) => addDays(new Date(), i - 13));
   const max = Math.max(1, ...days.map(x => (g.days[dstr(x)] || {}).done || 0));
   $('#main').innerHTML = `
     <h1 class="view-h">Rewards</h1>
     <p class="lead">Level ${l}, ${esc(titleOf(l))}. ${needXp(l + 1) - g.xp} XP to level ${l + 1}.</p>
     <div class="tiles">
-      <div class="tile"><b>${d.done}</b><span>finished today</span></div>
+      <div class="tile"><b>${td.created}</b><span>created today</span></div>
+      <div class="tile"><b>${td.closed}</b><span>closed today</span></div>
+      <div class="tile"><b>${td.comments}</b><span>comments today</span></div>
       <div class="tile"><b>${d.xp}</b><span>XP today</span></div>
-      <div class="tile"><b>${g.counts.ticketClose || 0}</b><span>tickets closed</span></div>
-      <div class="tile"><b>${g.streak.best || 0}</b><span>best workday streak</span></div>
+    </div>
+    <div class="card"><h2>All time</h2>
+      <div class="tiles" style="margin:0">
+        <div class="tile"><b>${all.created}</b><span>created<br>${nOf(g.counts.todoCreate, 'to-do')}, ${nOf(g.counts.ticketCreate, 'ticket')}</span></div>
+        <div class="tile"><b>${all.closed}</b><span>closed<br>${nOf(g.counts.todoDone, 'to-do')}, ${nOf((g.counts.ticketClose || 0) + (g.counts.ticketClosedElsewhere || 0), 'ticket')}</span></div>
+        <div class="tile"><b>${all.comments}</b><span>comments written</span></div>
+        <div class="tile"><b>${g.streak.best || 0}</b><span>best workday streak</span></div>
+      </div>
     </div>
     <div class="card"><h2>Finished per day, last two weeks</h2>
       <div class="bars">${days.map(x => { const n = (g.days[dstr(x)] || {}).done || 0; return `<div class="${isWeekend(x) ? 'we' : ''}"><b>${n || ''}</b><i style="height:${Math.round(n / max * 100)}%"></i>${x.toLocaleDateString('en-GB', { weekday: 'narrow' })}</div>`; }).join('')}</div>
@@ -735,7 +758,6 @@ function renderRewards() {
         <li><span>Comment on a ticket</span><span class="xp">${XP.comment} XP</span></li>
         <li><span>Move a ticket to another status</span><span class="xp">${XP.transition} XP</span></li>
         <li><span>Finish before the due date</span><span class="xp">+${XP.onTime} XP</span></li>
-        <li><span>Reach the daily goal</span><span class="xp">+${XP.goal} XP</span></li>
         <li><span>Capture a to-do, tick a step, import a ticket</span><span class="xp">${XP.todoCreate} XP</span></li>
       </ul>
       <p class="help">Now and then a reward is doubled by luck.</p>
@@ -748,7 +770,7 @@ function renderRewards() {
 /* ------------------------------------------------------------------ settings view */
 function notifState() { return ('Notification' in window) ? Notification.permission : 'unsupported'; }
 function renderSettings() {
-  const s = S.settings, c = S.ticketCfg, ns = notifState();
+  const s = S.settings, c = S.ticketCfg, ns = notifState(), form = curForm();
   $('#main').innerHTML = `
     <h1 class="view-h">Settings</h1>
     <div class="card"><h2>Jira connection</h2>
@@ -765,20 +787,22 @@ function renderSettings() {
       <label class="f" for="s-jql">Search used for "Assigned to me" <small>JQL</small></label><input type="text" id="s-jql" data-ch="set" data-path="settings.jql" value="${esc(s.jql)}">
     </div>
 
-    <div class="card"><h2>New tickets</h2>
-      <p class="lead">These defaults pre-fill the form when you create a ticket.</p>
+    <div class="card"><h2>Ticket forms</h2>
+      <p class="lead">One form for each kind of ticket you create: its Jira project, its ticket type and the fields it needs. You choose the form when you create a ticket.</p>
+      <div class="chips" id="form-tabs">${c.forms.map(f => `<label class="chip"><input type="radio" name="form-sel" data-ch="form-sel" value="${f.id}" ${f.id === form.id ? 'checked' : ''}> ${esc(formLabel(f))}${f.id === c.defaultForm && c.forms.length > 1 ? ' <small>default</small>' : ''}</label>`).join('')}<button class="chip" data-act="form-add">Add a form</button></div>
       <div class="grid2">
-        <div><label class="f" for="c-proj">Project key</label><input type="text" id="c-proj" data-ch="set" data-path="ticketCfg.project" data-upper="1" value="${esc(c.project)}" placeholder="For example: OPS"></div>
-        <div><label class="f" for="c-def">Default ticket type</label><select id="c-def" data-ch="set" data-path="ticketCfg.defaultType">${c.types.map(t => `<option ${t === c.defaultType ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
+        <div><label class="f" for="fm-project">Project key</label><input type="text" id="fm-project" data-ch="form" data-k="project" value="${esc(form.project)}" placeholder="For example: OPS"></div>
+        <div><label class="f" for="fm-type">Ticket type <small>spelled as in Jira</small></label><input type="text" id="fm-type" data-ch="form" data-k="type" value="${esc(form.type)}">
+          <div class="chips"><button class="chip" data-act="form-types">Pick the type from Jira</button></div></div>
       </div>
-      <label class="f" for="c-types">Ticket types you can choose <small>separated by commas, spelled as in Jira</small></label>
-      <input type="text" id="c-types" data-ch="set" data-path="ticketCfg.types" data-list="1" value="${esc(c.types.join(', '))}">
-      <div class="chips" style="margin-top:14px"><label class="chip"><input type="checkbox" data-ch="set" data-path="ticketCfg.assignToMe" ${c.assignToMe ? 'checked' : ''}> Assign new tickets to me</label></div>
-    </div>
-
-    <div class="card"><h2>Fields in the ticket form</h2>
-      <p class="lead">Add the fields your project asks for, and list only the choices your team uses. They appear as a pick list when you create a ticket.</p>
-      ${c.fields.map((f, i) => `
+      <label class="f" for="fm-name">Name of the form <small>optional</small></label><input type="text" id="fm-name" data-ch="form" data-k="name" value="${esc(form.name)}" placeholder="${esc(formLabel(Object.assign({}, form, { name: '' })))}">
+      <div class="chips" style="margin-top:14px">
+        <label class="chip"><input type="checkbox" data-ch="form" data-k="assignToMe" ${form.assignToMe ? 'checked' : ''}> Assign new tickets to me</label>
+        ${c.forms.length > 1 ? `<label class="chip"><input type="checkbox" data-ch="form-default" ${form.id === c.defaultForm ? 'checked disabled' : ''}> Use this form by default</label>` : ''}
+      </div>
+      <h3 class="sub">Fields in this form</h3>
+      <p class="help" style="margin-top:0">Add the fields this project asks for, and list only the choices your team uses. They appear as a pick list when you create a ticket.</p>
+      ${form.fields.map((f, i) => `
       <div class="fieldcard" data-i="${i}">
         <div class="grid2">
           <div><label class="f">Name in the form</label><input type="text" data-ch="fld" data-k="label" value="${esc(f.label)}"></div>
@@ -789,27 +813,24 @@ function renderSettings() {
         <label class="f">Choices your team uses <small>one per line, spelled as in Jira. Empty means free text.</small></label>
         <textarea data-ch="fld" data-k="values" rows="3">${esc((f.values || []).join('\n'))}</textarea>
         <div class="chips"><button class="chip" data-act="fld-pick">Pick the choices from Jira</button></div>
-        <div class="grid2">
-          <div><label class="f">Preselected <small>optional</small></label><input type="text" data-ch="fld" data-k="def" value="${esc(isMulti(f.kind) ? (f.def || []).join(', ') : (f.def || ''))}"></div>
-          <div><label class="f">Only for these ticket types <small>empty means all</small></label><input type="text" data-ch="fld" data-k="types" value="${esc((f.types || []).join(', '))}"></div>
-        </div>
+        <label class="f">Preselected <small>optional</small></label><input type="text" data-ch="fld" data-k="def" value="${esc(isMulti(f.kind) ? (f.def || []).join(', ') : (f.def || ''))}">
         <div class="row" style="justify-content:space-between;margin-top:14px">
           <label class="chip"><input type="checkbox" data-ch="fld" data-k="required" ${f.required ? 'checked' : ''}> Required</label>
           <button class="btn small quiet danger" data-act="fld-del">Remove field</button>
         </div>
-      </div>`).join('')}
+      </div>`).join('') || '<p class="help">This form has no extra fields yet.</p>'}
       <div class="row wrap" style="margin-top:14px"><button class="btn" data-act="fld-add">Add a field</button><button class="btn" data-act="fld-browse">Find fields in Jira</button></div>
+      <div class="row wrap" style="margin-top:22px"><button class="btn small" data-act="form-dup">Copy this form</button>${c.forms.length > 1 ? `<button class="btn small quiet danger" data-act="form-del">Delete this form</button>` : ''}</div>
     </div>
 
     <div class="card"><h2>Ticket templates</h2>
-      <p class="lead">A template fills project, type, text and fields in one go. You can also save one from the ticket form.</p>
-      ${c.templates.map(t => `<div class="tpl" data-tpl="${t.id}"><span><b>${esc(t.name)}</b> <span class="help">${esc(t.type)}${t.project ? ' in ' + esc(t.project) : ''}</span></span><span class="row"><button class="btn small" data-act="tpl-edit">Edit</button><button class="btn small quiet danger" data-act="tpl-del">Delete</button></span></div>`).join('') || '<p class="help">No templates yet.</p>'}
+      <p class="lead">A template picks a form and fills in text and fields in one go. You can also save one while you create a ticket.</p>
+      ${c.templates.map(t => `<div class="tpl" data-tpl="${t.id}"><span><b>${esc(t.name)}</b> <span class="help">${esc(formLabel(formById(t.formId) || defForm()))}</span></span><span class="row"><button class="btn small" data-act="tpl-edit">Edit</button><button class="btn small quiet danger" data-act="tpl-del">Delete</button></span></div>`).join('') || '<p class="help">No templates yet.</p>'}
       <div class="row" style="margin-top:14px"><button class="btn" data-act="tpl-new">New template</button></div>
     </div>
 
     <div class="card"><h2>Day to day</h2>
       <div class="grid2">
-        <div><label class="f" for="s-goal">Daily goal <small>things finished per day</small></label><input type="number" id="s-goal" min="1" max="20" data-ch="set" data-path="settings.dailyGoal" value="${s.dailyGoal}"></div>
         <div><label class="f" for="s-rt">Reminder time for due dates without a time</label><input type="time" id="s-rt" data-ch="set" data-path="settings.dayRemindTime" value="${esc(s.dayRemindTime)}"></div>
         <div><label class="f" for="s-theme">Appearance</label><select id="s-theme" data-ch="set" data-path="settings.theme"><option value="auto" ${s.theme === 'auto' ? 'selected' : ''}>Same as Windows</option><option value="light" ${s.theme === 'light' ? 'selected' : ''}>Light</option><option value="dark" ${s.theme === 'dark' ? 'selected' : ''}>Dark</option></select></div>
       </div>
@@ -830,48 +851,69 @@ function renderSettings() {
 }
 
 /* field tools in settings */
+const curForm = () => formById(UI.formSel) || defForm();
+/* re-renders the settings without losing the keyboard position */
+function redrawSettings() {
+  setTimeout(() => {
+    const id = document.activeElement && document.activeElement.id;
+    renderSettings();
+    const el = id && document.getElementById(id); if (el) el.focus();
+  }, 0);
+}
 async function fldPick(i, btn) {
-  const c = S.ticketCfg, f = c.fields[i];
+  const form = curForm(), f = form.fields[i];
   if (!requireJira()) return;
-  if (!c.project) { toast('Enter the project key under "New tickets" first.', { kind: 'bad' }); return; }
+  if (!form.project) { toast('Enter the project key of this form first.', { kind: 'bad' }); return; }
   if (!f.fieldId) { toast('Enter the Jira field ID first.', { kind: 'bad' }); return; }
-  const type = (f.types && f.types[0]) || c.defaultType;
   busy(btn, true, 'Loading');
   let names = [];
   try {
-    const metaF = (await createMeta(c.project, type)).find(x => x.id === f.fieldId);
+    const metaF = (await createMeta(form.project, form.type)).find(x => x.id === f.fieldId);
     if (metaF && metaF.allowed) names = metaF.allowed.map(v => v.name || v.value).filter(Boolean);
-    if (!names.length && f.fieldId === 'components') names = (await jira('GET', `rest/api/2/project/${encodeURIComponent(c.project)}/components`)).map(v => v.name);
-    if (!names.length) throw new Error(metaF ? `Jira offers no fixed choices for ${metaF.name}.` : `The create screen for ${type} in ${c.project} has no field "${f.fieldId}".`);
+    if (!names.length && f.fieldId === 'components') names = (await jira('GET', `rest/api/2/project/${encodeURIComponent(form.project)}/components`)).map(v => v.name);
+    if (!names.length) throw new Error(metaF ? `Jira offers no fixed choices for ${metaF.name}.` : `The create screen for ${form.type} in ${form.project} has no field "${f.fieldId}".`);
   } catch (e) { busy(btn, false); toast(e.message, { kind: 'bad', ttl: 8000 }); return; }
   busy(btn, false);
   const cur = new Set(f.values || []);
-  const w = modal(`<h2>Choices for ${esc(f.label || f.fieldId)}</h2><p class="lead">Tick the ones your team uses. ${names.length} are available in ${esc(c.project)}.</p>
+  const w = modal(`<h2>Choices for ${esc(f.label || f.fieldId)}</h2><p class="lead">Tick the ones your team uses. ${names.length} are available in ${esc(form.project)}.</p>
     <input type="text" id="pk-filter" placeholder="Filter" autofocus>
     <div class="picklist">${names.map(n => `<label class="pick"><input type="checkbox" value="${esc(n)}" ${cur.has(n) ? 'checked' : ''}><span class="grow">${esc(n)}</span></label>`).join('')}</div>
     <div class="mfoot"><button class="btn" data-act="modal-close">Cancel</button><button class="btn primary" id="pk-ok">Use these</button></div>`);
   $('#pk-filter', w).addEventListener('input', e => { const q = e.target.value.toLowerCase(); $$('.pick', w).forEach(p => { p.hidden = !!q && !p.textContent.toLowerCase().includes(q); }); });
   $('#pk-ok', w).onclick = () => { f.values = $$('.picklist input:checked', w).map(x => x.value); save(); closeModal(w); renderSettings(); };
 }
-function fldBrowse() {
-  const c = S.ticketCfg;
+async function formTypes(btn) {
+  const form = curForm();
   if (!requireJira()) return;
-  if (!c.project) { toast('Enter the project key under "New tickets" first.', { kind: 'bad' }); return; }
-  modal(`<h2>Fields in ${esc(c.project)}</h2><p class="lead">Jira lists the fields of the create screen. Add the ones you want in your ticket form.</p>
-    <div class="row"><select id="fb-type" aria-label="Ticket type">${c.types.map(t => `<option ${t === c.defaultType ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select><button class="btn primary" data-act="fb-load">Show fields</button></div>
+  if (!form.project) { toast('Enter the project key of this form first.', { kind: 'bad' }); return; }
+  busy(btn, true, 'Loading');
+  let names = [];
+  try { names = await projectTypes(form.project); if (!names.length) throw new Error(`Jira lists no ticket types for ${form.project}.`); }
+  catch (e) { busy(btn, false); toast(e.message, { kind: 'bad', ttl: 8000 }); return; }
+  busy(btn, false);
+  const w = modal(`<h2>Ticket types in ${esc(form.project)}</h2><p class="lead">Choose the type this form creates.</p>
+    <div class="picklist">${names.map(n => `<label class="pick"><input type="radio" name="ft" value="${esc(n)}" ${n === form.type ? 'checked' : ''}><span class="grow">${esc(n)}</span></label>`).join('')}</div>
+    <div class="mfoot"><button class="btn" data-act="modal-close">Cancel</button><button class="btn primary" id="ft-ok">Use this type</button></div>`);
+  $('#ft-ok', w).onclick = () => { const r = $('input[name=ft]:checked', w); if (r) { form.type = r.value; save(); } closeModal(w); renderSettings(); };
+}
+function fldBrowse() {
+  const form = curForm();
+  if (!requireJira()) return;
+  if (!form.project) { toast('Enter the project key of this form first.', { kind: 'bad' }); return; }
+  modal(`<h2>Fields for ${esc(form.type)} in ${esc(form.project)}</h2><p class="lead">Jira lists the fields of the create screen. Add the ones you want in this form.</p>
     <div id="fb-list"></div>
     <div class="mfoot"><button class="btn" data-act="modal-close">Done</button></div>`, 'wide');
   fbLoad();
 }
 async function fbLoad() {
-  const box = $('#fb-list'), c = S.ticketCfg, type = $('#fb-type').value;
+  const box = $('#fb-list'), form = curForm();
   box.innerHTML = `<p class="help"><span class="spin"></span>Asking Jira</p>`;
   try {
     const skip = new Set(['project', 'issuetype', 'summary', 'description', 'assignee', 'reporter', 'parent', 'attachment', 'issuelinks', 'timetracking']);
-    const fields = (await createMeta(c.project, type)).filter(f => !skip.has(f.id)).sort((a, b) => (b.required - a.required) || a.name.localeCompare(b.name));
-    UI.fb = { type, fields };
+    const fields = (await createMeta(form.project, form.type)).filter(f => !skip.has(f.id)).sort((a, b) => (b.required - a.required) || a.name.localeCompare(b.name));
+    UI.fb = { fields };
     box.innerHTML = fields.length ? `<div class="picklist">${fields.map((f, i) => {
-      const had = c.fields.some(x => x.fieldId === f.id);
+      const had = form.fields.some(x => x.fieldId === f.id);
       return `<div class="pick" style="cursor:default"><span class="grow"><span class="title">${esc(f.name)}${f.required ? ' <span class="due over">required</span>' : ''}</span><span class="meta"><span>${esc(f.id)}</span><span>${esc(KINDS[kindFromSchema(f.schema)].split(',')[0].split(' (')[0])}</span>${f.allowed ? `<span>${f.allowed.length} choices</span>` : ''}</span></span>
         <button class="btn small" data-act="fb-add" data-n="${i}" ${had ? 'disabled' : ''}>${had ? 'Added' : 'Add'}</button></div>`;
     }).join('')}</div>` : `<p class="help">Jira returned no extra fields for this type.</p>`;
@@ -1000,15 +1042,35 @@ const ACT = {
     confirmBox('Delete this template?', `"${t.name}" is removed. Tickets you already created stay as they are.`, 'Delete', () => { S.ticketCfg.templates = S.ticketCfg.templates.filter(x => x.id !== id); save(); renderSettings(); });
   },
 
-  'fld-add'() { S.ticketCfg.fields.push({ uid: 'f_' + uid(), label: '', fieldId: '', kind: 'single-option', values: [], required: false, def: '', types: [] }); save(); renderSettings(); },
-  'fld-del'(el) { const i = +el.closest('[data-i]').dataset.i; S.ticketCfg.fields.splice(i, 1); save(); renderSettings(); },
+  'form-add'() {
+    const cur = curForm(), f = { id: 'form_' + uid(), name: '', project: cur.project, type: 'Task', assignToMe: !!cur.assignToMe, fields: [] };
+    S.ticketCfg.forms.push(f); UI.formSel = f.id; save(); renderSettings();
+    const t = $('#fm-type'); if (t) { t.focus(); t.select(); }
+  },
+  'form-dup'() {
+    const cur = curForm(), f = clone(cur);
+    f.id = 'form_' + uid(); f.name = formLabel(cur) + ' copy';
+    S.ticketCfg.forms.push(f); UI.formSel = f.id; save(); renderSettings();
+    const n = $('#fm-name'); if (n) { n.focus(); n.select(); }
+  },
+  'form-del'() {
+    const c = S.ticketCfg, f = curForm(), n = c.templates.filter(t => t.formId === f.id).length;
+    if (c.forms.length < 2) return;
+    confirmBox('Delete this form?', `"${formLabel(f)}" is removed${n ? `, together with ${n === 1 ? 'the template' : `the ${n} templates`} that use${n === 1 ? 's' : ''} it` : ''}. Tickets you already created stay as they are.`, 'Delete', () => {
+      c.forms = c.forms.filter(x => x.id !== f.id); c.templates = c.templates.filter(t => t.formId !== f.id);
+      if (c.defaultForm === f.id) c.defaultForm = c.forms[0].id;
+      UI.formSel = null; save(); renderSettings();
+    });
+  },
+  'form-types'(el) { formTypes(el); },
+  'fld-add'() { curForm().fields.push({ uid: 'f_' + uid(), label: '', fieldId: '', kind: 'single-option', values: [], required: false, def: '' }); save(); renderSettings(); },
+  'fld-del'(el) { const i = +el.closest('[data-i]').dataset.i; curForm().fields.splice(i, 1); save(); renderSettings(); },
   'fld-pick'(el) { fldPick(+el.closest('[data-i]').dataset.i, el); },
   'fld-browse'() { fldBrowse(); },
-  'fb-load'() { fbLoad(); },
   'fb-add'(el) {
     const f = UI.fb.fields[+el.dataset.n], kind = kindFromSchema(f.schema);
     const names = (f.allowed || []).map(v => v.name || v.value).filter(Boolean);
-    S.ticketCfg.fields.push({ uid: 'f_' + uid(), label: f.name, fieldId: f.id, kind, values: names.length <= 12 ? names : [], required: f.required, def: isMulti(kind) ? [] : '', types: [] });
+    curForm().fields.push({ uid: 'f_' + uid(), label: f.name, fieldId: f.id, kind, values: names.length <= 12 ? names : [], required: f.required, def: isMulti(kind) ? [] : '' });
     save(); el.disabled = true; el.textContent = 'Added'; renderSettings();
     if (names.length > 12) toast(`${f.name} added. It has ${names.length} choices: use "Pick the choices from Jira" to keep only yours.`, { ttl: 8000 });
   },
@@ -1074,26 +1136,32 @@ const CH = {
     for (const k of path.slice(0, -1)) o = o[k];
     let v = el.type === 'checkbox' ? el.checked : el.type === 'number' ? Math.min(+el.max || 1e9, Math.max(+el.min || 0, Math.round(+el.value || 0))) : el.value.trim();
     if (el.dataset.upper) v = v.toUpperCase();
-    if (el.dataset.list) { v = splitList(v); if (!v.length) v = defaults().ticketCfg.types; }
     o[path[path.length - 1]] = v;
-    const c = S.ticketCfg; if (!c.types.includes(c.defaultType)) c.defaultType = c.types[0];
     save();
     const p = el.dataset.path;
     if (p === 'settings.theme') applyTheme();
-    if (p === 'settings.dailyGoal') renderPlayer();
-    if (p === 'ticketCfg.types' || el.type === 'number' || el.dataset.upper) renderSettings();
+    if (el.type === 'number') redrawSettings();
   },
   fld(el) {
-    const f = S.ticketCfg.fields[+el.closest('[data-i]').dataset.i], k = el.dataset.k;
+    const f = curForm().fields[+el.closest('[data-i]').dataset.i], k = el.dataset.k;
     if (k === 'required') f.required = el.checked;
     else if (k === 'values') f.values = splitList(el.value);
-    else if (k === 'types') f.types = splitList(el.value);
     else if (k === 'def') f.def = isMulti(f.kind) ? splitList(el.value) : el.value.trim();
     else if (k === 'kind') { f.kind = el.value; f.def = normVal(f, f.def); }
     else f[k] = el.value.trim();
     save();
   },
-  'tf-type'() { tfCollect(); tfRender(); },
+  'tf-form'(el) { tfCollect(); tfSetForm(el.value); },
+  'form-sel'(el) { UI.formSel = el.value; renderSettings(); },
+  'form-default'(el) { if (el.checked) { S.ticketCfg.defaultForm = curForm().id; save(); renderSettings(); } },
+  form(el) {
+    const f = curForm(), k = el.dataset.k;
+    if (k === 'assignToMe') { f.assignToMe = el.checked; save(); return; }
+    if (k === 'project') f.project = el.value.trim().toUpperCase();
+    else if (k === 'type') f.type = el.value.trim() || f.type;
+    else f[k] = el.value.trim();
+    save(); redrawSettings();
+  },
   'tf-tpl'(el) { tfCollect(); tfApplyTemplate(el.value); },
   'tr-sel'(el) { TRX.sel = el.value; trxRender(); }
 };
@@ -1158,7 +1226,7 @@ function restoreBackup(input) {
     input.value = '';
     if (!data || !Array.isArray(data.items) || !data.game) { toast('This file is not a FocusQuest backup.', { kind: 'bad' }); return; }
     confirmBox('Restore this backup?', `It replaces everything in FocusQuest with the ${data.items.length} items and ${data.game.xp || 0} XP from the file.`, 'Restore', () => {
-      S = merge(defaults(), data); for (const it of S.items) { if (!it.steps) it.steps = []; }
+      S = merge(defaults(), upgrade(data)); normalize(); UI.formSel = null;
       save(); applyTheme(); closeDrawer(); renderAll(); toast('Backup restored.');
     });
   };

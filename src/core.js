@@ -41,19 +41,22 @@ function fmtDateTime(iso) {
 }
 
 /* ------------------------------------------------------------------ state */
+function defaultForm() {
+  return {
+    id: 'form_' + uid(), name: '', project: '', type: 'Task', assignToMe: true,
+    fields: [{ uid: 'f_components', label: 'Components', fieldId: 'components', kind: 'multi-name', values: [], required: true, def: [] }]
+  };
+}
 function defaults() {
   return {
-    v: 1, rev: 0, items: [],
+    v: 2, rev: 0, items: [],
     game: { xp: 0, log: [], streak: { count: 0, last: null, best: 0 }, counts: {}, days: {}, badges: {} },
     settings: {
-      dailyGoal: 3, sound: true, motion: true, theme: 'auto', sort: 'prio', dayRemindTime: '09:00', refreshMin: 15,
+      sound: true, motion: true, theme: 'auto', sort: 'prio', dayRemindTime: '09:00', refreshMin: 15,
       jql: 'assignee = currentUser() AND resolution = Unresolved ORDER BY updated DESC'
     },
-    ticketCfg: {
-      project: '', types: ['Service Request', 'Task', 'Story'], defaultType: 'Task', assignToMe: true,
-      fields: [{ uid: 'f_components', label: 'Components', fieldId: 'components', kind: 'multi-name', values: [], required: true, def: [], types: [] }],
-      templates: []
-    }
+    // forms: one per kind of ticket you create (Jira project + ticket type + its fields). Templates belong to a form.
+    ticketCfg: { forms: [], defaultForm: '', templates: [] }
   };
 }
 function merge(def, obj) {
@@ -62,6 +65,48 @@ function merge(def, obj) {
   for (const k in def) out[k] = merge(def[k], out[k]);
   return out;
 }
+
+/* Brings a data file written by an older version up to date. Runs before merge(). */
+function upgrade(raw) {
+  if (!raw || typeof raw !== 'object') return raw;
+  const c = raw.ticketCfg;
+  if (c && typeof c === 'object' && !Array.isArray(c.forms)) {
+    // version 1 had one project, a list of ticket types and one field list shared by all types
+    const types = (Array.isArray(c.types) && c.types.length) ? c.types : ['Task'];
+    const flds = Array.isArray(c.fields) ? c.fields : [];
+    const forType = t => flds.filter(f => !f.types || !f.types.length || f.types.some(x => String(x).toLowerCase() === t.toLowerCase())).map(f => { const o = clone(f); delete o.types; return o; });
+    const mk = (project, type) => ({ id: 'form_' + uid(), name: '', project: project || '', type, assignToMe: c.assignToMe !== false, fields: forType(type) });
+    c.forms = types.map(t => mk(c.project, t));
+    const def = c.forms.find(f => f.type === c.defaultType) || c.forms[0];
+    c.defaultForm = def.id;
+    for (const t of (Array.isArray(c.templates) ? c.templates : [])) {
+      const p = t.project || c.project || '', ty = t.type || def.type;
+      let f = c.forms.find(x => x.type === ty && x.project === p);
+      if (!f) { f = mk(p, ty); c.forms.push(f); }
+      t.formId = f.id; delete t.project; delete t.type;
+    }
+    for (const k of ['project', 'types', 'defaultType', 'fields', 'assignToMe']) delete c[k];
+  }
+  if (raw.settings) delete raw.settings.dailyGoal;
+  raw.v = 2;
+  return raw;
+}
+/* After loading or restoring: guarantees the shape the rest of the code relies on. */
+function normalize() {
+  for (const it of S.items) { if (!it.steps) it.steps = []; if (!it.prio) it.prio = 2; }
+  const c = S.ticketCfg;
+  c.forms = c.forms.filter(f => f && typeof f === 'object');
+  if (!c.forms.length) c.forms.push(defaultForm());
+  for (const f of c.forms) { if (!f.id) f.id = 'form_' + uid(); if (!f.type) f.type = 'Task'; if (!Array.isArray(f.fields)) f.fields = []; f.project = f.project || ''; f.name = f.name || ''; }
+  if (!c.forms.some(f => f.id === c.defaultForm)) c.defaultForm = c.forms[0].id;
+  c.templates = c.templates.filter(t => c.forms.some(f => f.id === t.formId));
+  // today's statistics for data written before they were counted per day
+  const d = S.game.days[today()];
+  if (d && !d.n) { d.n = {}; for (const e of S.game.log) if (dstr(new Date(e.t)) === today()) d.n[e.type] = (d.n[e.type] || 0) + 1; }
+}
+const formById = id => S.ticketCfg.forms.find(f => f.id === id);
+const defForm = () => formById(S.ticketCfg.defaultForm) || S.ticketCfg.forms[0];
+const formLabel = f => f.name || (f.project ? `${f.type} in ${f.project}` : f.type);
 
 let S = defaults();
 let meta = { jira: { baseUrl: '', hasToken: false } };
@@ -114,8 +159,8 @@ async function loadState() {
   } else {
     try { raw = JSON.parse(localStorage.getItem('focusquest') || 'null'); } catch (e) { raw = null; }
   }
-  S = merge(defaults(), raw || {});
-  for (const it of S.items) { if (!it.steps) it.steps = []; if (!it.prio) it.prio = 2; }
+  S = merge(defaults(), upgrade(raw) || {});
+  normalize();
 }
 
 /* ------------------------------------------------------------------ dates, due, reminders */
@@ -172,12 +217,17 @@ function parseQuick(text) {
 }
 
 /* ------------------------------------------------------------------ game */
-const XP = { todoCreate: 5, step: 5, todoDone: { 1: 40, 2: 30, 3: 20 }, onTime: 10, import: 5, ticketCreate: 40, comment: 20, transition: 15, ticketClose: 120, ticketClosedElsewhere: 60, goal: 50 };
+const XP = { todoCreate: 5, step: 5, todoDone: { 1: 40, 2: 30, 3: 20 }, onTime: 10, import: 5, ticketCreate: 40, comment: 20, transition: 15, ticketClose: 120, ticketClosedElsewhere: 60 };
 const TITLES = ['Fresh start', 'Getting going', 'List wrangler', 'Ticket tamer', 'Flow finder', 'Backlog breaker', 'Sprint ranger', 'Queue commander', 'Master closer', 'Board legend'];
 const needXp = l => 50 * l * (l - 1);                 // total XP needed to reach level l
 function levelOf(xp) { let l = 1; while (xp >= needXp(l + 1)) l++; return l; }
 const titleOf = l => TITLES[Math.min(l, TITLES.length) - 1];
-function dayRec(d = today()) { return S.game.days[d] || (S.game.days[d] = { xp: 0, done: 0 }); }
+function dayRec(d = today()) { return S.game.days[d] || (S.game.days[d] = { xp: 0, done: 0, n: {} }); }
+/* statistics from a set of counters (one day's, or all time): to-dos and tickets together */
+function statsOf(n) {
+  const g = k => (n && n[k]) || 0;
+  return { created: g('todoCreate') + g('ticketCreate'), closed: g('todoDone') + g('ticketClose') + g('ticketClosedElsewhere'), comments: g('comment') };
+}
 const isWeekend = d => { const w = d.getDay(); return w === 0 || w === 6; };
 /* true when no workday lies strictly between the two dates */
 function onlyWeekendBetween(a, b) {
@@ -201,7 +251,6 @@ const BADGES = [
   { id: 'closer10', ic: '🏅', name: 'Serial closer', desc: 'Close 10 tickets', test: g => (g.counts.ticketClose || 0) >= 10 },
   { id: 'closer50', ic: '🏆', name: 'Backlog breaker', desc: 'Close 50 tickets', test: g => (g.counts.ticketClose || 0) >= 50 },
   { id: 'hat', ic: '🎩', name: 'Hat trick', desc: 'Finish 3 things in one day', test: () => dayRec().done >= 3 },
-  { id: 'goal', ic: '🎯', name: 'On target', desc: 'Reach your daily goal', test: () => !!dayRec().goalHit },
   { id: 'streak3', ic: '🔥', name: 'Warmed up', desc: '3 workdays in a row', test: g => g.streak.count >= 3 },
   { id: 'streak5', ic: '🚀', name: 'On a roll', desc: '5 workdays in a row', test: g => g.streak.count >= 5 },
   { id: 'streak10', ic: '⚡', name: 'Unstoppable', desc: '10 workdays in a row', test: g => g.streak.count >= 10 },
@@ -213,8 +262,11 @@ function award(type, base, label, o = {}) {
   let xp = base, lucky = false;
   if (o.lucky !== false && base >= 20 && Math.random() < 0.12) { xp = base * 2; lucky = true; }
   const before = levelOf(S.game.xp);
-  S.game.xp += xp; dayRec().xp += xp;
+  const day = dayRec();
+  S.game.xp += xp; day.xp += xp;
   S.game.counts[type] = (S.game.counts[type] || 0) + 1;
+  if (!day.n) day.n = {};
+  day.n[type] = (day.n[type] || 0) + 1;
   S.game.log.unshift({ t: Date.now(), type, xp, label });
   if (S.game.log.length > 200) S.game.log.length = 200;
   toast(`<span>+${xp} XP${lucky ? ' &nbsp;Lucky double!' : ''}</span><small>${esc(label)}</small>`, { kind: 'xp', html: true, ttl: lucky ? 4500 : 2800 });
@@ -227,20 +279,17 @@ function award(type, base, label, o = {}) {
 function takeXp(xp, type, day) {
   S.game.xp = Math.max(0, S.game.xp - xp);
   if (type && S.game.counts[type]) S.game.counts[type]--;
-  const d = S.game.days[day || today()]; if (d) { d.xp = Math.max(0, d.xp - xp); }
+  const d = S.game.days[day || today()];
+  if (d) { d.xp = Math.max(0, d.xp - xp); if (type && d.n && d.n[type]) d.n[type]--; }
   renderPlayer();
 }
-/* something got finished: daily goal + streak */
+/* something got finished: day count + streak */
 function bumpDone() {
   const t = today(), d = dayRec(t), s = S.game.streak;
   d.done++;
   if (s.last !== t) {
     s.count = (s.last && onlyWeekendBetween(s.last, t)) ? s.count + 1 : 1;
     s.last = t; s.best = Math.max(s.best || 0, s.count);
-  }
-  if (!d.goalHit && d.done >= S.settings.dailyGoal) {
-    d.goalHit = true;
-    setTimeout(() => { award('goal', XP.goal, 'Daily goal reached', { lucky: false }); save(); }, 900);
   }
   checkBadges();
   renderPlayer();
@@ -420,6 +469,16 @@ function sanitize(html) {
 const textToHtml = t => esc(t).replace(/\r?\n/g, '<br>');
 const richHtml = (html, text) => html != null ? sanitize(html) : textToHtml(text || '');
 
+/* names of the ticket types a project offers */
+async function projectTypes(project) {
+  const p = encodeURIComponent(project);
+  try {
+    const r = await jira('GET', `rest/api/2/issue/createmeta/${p}/issuetypes?maxResults=200`);
+    return (r.values || r.issueTypes || []).map(x => x.name);
+  } catch (e) { if (e.status !== 404 && e.status !== 405) throw e; }
+  const r = await jira('GET', `rest/api/2/project/${p}`);
+  return (r.issueTypes || []).map(x => x.name);
+}
 /* create-screen metadata: Jira 9+ first, older endpoint as fallback */
 async function createMeta(project, typeName) {
   const p = encodeURIComponent(project);
