@@ -1,0 +1,164 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Version
+        id: version
+        run: echo "version=$(tr -d '[:space:]' < VERSION).${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+
+      - name: Windows scripts must be ASCII-only
+        run: |
+          if LC_ALL=C grep -nP '[^\x00-\x7F]' server.ps1 install.ps1 Start-FocusQuest.cmd Install-FocusQuest.cmd; then
+            echo "Non-ASCII bytes found (Windows PowerShell 5.1 would misread them)"; exit 1
+          fi
+
+      - name: Build app.html
+        run: node dev/build.js
+
+      - name: Assemble zip
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p dist/FocusQuest
+          cp app.html dist/FocusQuest/
+          # Files for Windows get CRLF line endings whatever the checkout produced.
+          for f in server.ps1 install.ps1 Start-FocusQuest.cmd Install-FocusQuest.cmd README.txt; do
+            sed 's/\r$//; s/$/\r/' "$f" > "dist/FocusQuest/$f"
+          done
+          sed 's/\r$//; s/$/\r/' LICENSE > dist/FocusQuest/LICENSE.txt
+          printf '%s\r\n' "$VERSION" > dist/FocusQuest/version.txt
+          cd dist
+          zip -r -X "FocusQuest-$VERSION.zip" FocusQuest
+          sha256sum "FocusQuest-$VERSION.zip" > "FocusQuest-$VERSION.zip.sha256"
+          rm -r FocusQuest
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: dist/
+          if-no-files-found: error
+
+  # Runs the installer from the zip on Windows PowerShell 5.1 (shell: powershell, not pwsh).
+  installer-test:
+    needs: build
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: dist
+
+      - name: Install from the zip
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = (Get-ChildItem dist\*.zip)[0].FullName
+          Expand-Archive -LiteralPath $zip -DestinationPath extracted
+          $src = Join-Path (Resolve-Path extracted) 'FocusQuest'
+          $target = Join-Path $env:LOCALAPPDATA 'FocusQuest'
+
+          & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$src\install.ps1" -NoStart
+          if ($LASTEXITCODE -ne 0) { throw "installer exited with $LASTEXITCODE" }
+
+          foreach ($f in 'app.html','server.ps1','Start-FocusQuest.cmd','README.txt','LICENSE.txt','version.txt') {
+            if (-not (Test-Path -LiteralPath (Join-Path $target $f))) { throw "$f was not installed" }
+          }
+          if (Test-Path -LiteralPath (Join-Path $target 'install.ps1')) { throw 'installer copied itself' }
+
+          $lnk = Join-Path ([Environment]::GetFolderPath('Programs')) 'FocusQuest.lnk'
+          if (-not (Test-Path -LiteralPath $lnk)) { throw 'Start menu entry missing' }
+          $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+          if ($sc.TargetPath -ne (Join-Path $target 'Start-FocusQuest.cmd')) { throw "shortcut points to $($sc.TargetPath)" }
+          Write-Host "Shortcut OK -> $($sc.TargetPath)"
+
+      - name: Reinstall keeps the data folder
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $src = Join-Path (Resolve-Path extracted) 'FocusQuest'
+          $target = Join-Path $env:LOCALAPPDATA 'FocusQuest'
+          New-Item -ItemType Directory -Path "$target\data" -Force | Out-Null
+          Set-Content -LiteralPath "$target\data\focusquest-data.json" -Value '{"keep":"me"}'
+          Set-Content -LiteralPath "$target\app.html" -Value 'old'
+          & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$src\install.ps1" -NoStart
+          if ($LASTEXITCODE -ne 0) { throw "installer exited with $LASTEXITCODE" }
+          if ((Get-Content -Raw "$target\data\focusquest-data.json") -notmatch 'keep') { throw 'data was touched' }
+          if ((Get-Item "$target\app.html").Length -lt 1000) { throw 'app.html was not replaced' }
+
+      - name: Installed helper starts and serves the app
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $target = Join-Path $env:LOCALAPPDATA 'FocusQuest'
+          $p = Start-Process powershell.exe -PassThru -WindowStyle Hidden -ArgumentList @(
+            '-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',"`"$target\server.ps1`"",'-NoBrowser','-Port','8791') `
+            -RedirectStandardOutput helper.out -RedirectStandardError helper.err
+          $ok = $false
+          for ($i = 0; $i -lt 30 -and -not $ok; $i++) {
+            Start-Sleep -Seconds 1
+            try {
+              $r = Invoke-WebRequest -UseBasicParsing -Uri 'http://localhost:8791/api/ping' -TimeoutSec 3
+              if ($r.Content -match 'focusquest') { $ok = $true }
+            } catch { }
+          }
+          if (-not $ok) {
+            Get-Content helper.out, helper.err -ErrorAction SilentlyContinue
+            if (-not $p.HasExited) { $p.Kill() }
+            throw 'helper did not answer on /api/ping'
+          }
+          $page = Invoke-WebRequest -UseBasicParsing -Uri 'http://localhost:8791/' -TimeoutSec 10
+          if ($page.Content -notmatch 'FocusQuest') { throw 'page not served' }
+          if ($page.Content -match '__FQ_TOKEN__') { throw 'secret placeholder was not replaced' }
+          $p.Kill()
+          Write-Host 'Helper OK'
+
+  release:
+    needs: [build, installer-test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: dist
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          cat > notes.md <<'NOTES'
+          **Install:** download `FocusQuest-VERSION.zip`, extract it, and double-click `Install-FocusQuest.cmd`. No admin rights needed.
+
+          **Update:** do the same again. Your data in the `data` folder is kept.
+
+          If Windows warns about the downloaded files: right-click the zip file, choose Properties, tick "Unblock", then extract.
+          NOTES
+          sed -i "s/^ *//; s/VERSION/$VERSION/" notes.md
+          gh release create "v$VERSION" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "FocusQuest $VERSION" \
+            --notes-file notes.md \
+            --generate-notes

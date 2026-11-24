@@ -4,13 +4,23 @@ A to-do and Jira ticket board that rewards you for getting things done.
 Runs on Windows 11 without installation and without admin rights.
 
 
-START
------
-1. Extract the whole folder somewhere you can write to, for example Documents\FocusQuest.
-2. Double-click  Start-FocusQuest.cmd
+INSTALL
+-------
+1. Extract the whole zip file anywhere, for example in Downloads.
+2. Double-click  Install-FocusQuest.cmd
+   It copies FocusQuest to %LOCALAPPDATA%\FocusQuest, adds a "FocusQuest" entry to the
+   Start menu and starts the app. No admin rights are needed.
+3. From now on start FocusQuest from the Start menu.
    A small "FocusQuest helper" window opens minimized and your browser opens
    http://localhost:8765/
-3. Keep the helper window open while you work. Closing it stops FocusQuest.
+4. Keep the helper window open while you work. Closing it stops FocusQuest.
+
+To update, download the newer zip and run Install-FocusQuest.cmd again. Your data is kept.
+To uninstall, delete the folder %LOCALAPPDATA%\FocusQuest (this deletes your data too)
+and the FocusQuest entry in the Start menu (right-click > Open file location > delete).
+
+Without the installer: put the extracted folder somewhere you can write to, for example
+Documents\FocusQuest, and double-click Start-FocusQuest.cmd.
 
 If Windows shows a security warning for the downloaded files: right-click the zip file
 before extracting, choose Properties, tick "Unblock", then extract again.
@@ -20,6 +30,8 @@ Tip: bookmark http://localhost:8765/ or pin the tab. Reminders only fire while t
 
 FILES
 -----
+Install-FocusQuest.cmd installs into your user profile and adds the Start menu entry
+install.ps1            the installer script behind it
 Start-FocusQuest.cmd   starts everything
 server.ps1             the helper: serves the page, saves your data, relays calls to Jira
 app.html               the app itself
