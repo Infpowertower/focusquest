@@ -2,6 +2,8 @@
 /* FocusQuest - everything runs locally in this page. The helper (server.ps1) stores the data and relays Jira calls. */
 const TOKEN = '__FQ_TOKEN__';
 const SERVED = /^http/.test(location.protocol) && TOKEN.indexOf('__FQ') !== 0;
+// Browser version: the page is hosted on a website instead of being served by the helper.
+const WEB = !SERVED && /^http/.test(location.protocol);
 
 /* ------------------------------------------------------------------ small helpers */
 const $ = (s, r = document) => r.querySelector(s);
@@ -344,7 +346,7 @@ class JiraError extends Error { constructor(msg, status) { super(msg); this.stat
 const jiraReady = () => SERVED && !!meta.jira.baseUrl && meta.jira.hasToken;
 
 async function jira(method, path, body) {
-  if (!SERVED) throw new JiraError('Jira needs the helper. Start FocusQuest with Start-FocusQuest.cmd.', 0);
+  if (!SERVED) throw new JiraError(WEB ? 'Jira is not available in the browser version.' : 'Jira needs the helper. Start FocusQuest with Start-FocusQuest.cmd.', 0);
   let r;
   try {
     r = await fetch('/jira/' + path, {

@@ -44,7 +44,8 @@ function renderPlayer(bump) {
 }
 function renderRailFoot() {
   let h = '';
-  if (!SERVED) h = `<span>Running without the helper. Jira is off and data stays in this browser.</span>`;
+  if (WEB) h = `<span>Browser version. Jira is off and data stays in this browser.</span>`;
+  else if (!SERVED) h = `<span>Running without the helper. Jira is off and data stays in this browser.</span>`;
   else if (helperDown) h = `<button class="conn bad" data-act="view" data-view="settings"><i></i>Helper not running. Start FocusQuest again.</button>`;
   else if (jiraReady()) h = `<button class="conn ok" data-act="view" data-view="settings"><i></i>Jira connected${me ? ' as ' + esc(me.displayName || me.name) : ''}</button>`;
   else h = `<button class="conn" data-act="view" data-view="settings"><i></i>Jira not connected. Set it up</button>`;
@@ -61,7 +62,7 @@ function renderMain() {
 }
 function renderBoard() {
   $('#main').innerHTML = `
-    ${!SERVED ? `<div class="banner">You opened app.html directly. To-dos, reminders and rewards work and are kept in this browser. For Jira and for a data file on disk, start FocusQuest with Start-FocusQuest.cmd.</div>` : ''}
+    ${!SERVED && !WEB ? `<div class="banner">You opened app.html directly. To-dos, reminders and rewards work and are kept in this browser. For Jira and for a data file on disk, start FocusQuest with Start-FocusQuest.cmd.</div>` : ''}
     <form class="capture" id="capture" autocomplete="off">
       <input type="text" id="q" placeholder="What needs doing? Type it and press Enter" aria-label="New to-do">
       <button type="button" class="pp p${UI.capPrio}" data-act="cap-prio" title="Priority for the new to-do. Click to change.">${PRIO[UI.capPrio]}</button>
@@ -343,7 +344,7 @@ function busy(btn, on, label) {
   else { btn.disabled = false; btn.textContent = btn.dataset.label || btn.textContent; }
 }
 function requireJira() {
-  if (!SERVED) { toast('Jira needs the helper. Start FocusQuest with Start-FocusQuest.cmd.', { kind: 'bad' }); return false; }
+  if (!SERVED) { toast(WEB ? 'Jira is not available in the browser version.' : 'Jira needs the helper. Start FocusQuest with Start-FocusQuest.cmd.', { kind: 'bad' }); return false; }
   if (!jiraReady()) { toast('Jira is not connected yet.', { actions: [{ label: 'Open settings', fn: () => { UI.view = 'settings'; renderMain(); } }], ttl: 8000 }); return false; }
   return true;
 }
@@ -822,7 +823,7 @@ function renderSettings() {
     </div>
 
     <div class="card"><h2>Your data</h2>
-      <p class="lead">${SERVED ? 'Everything is saved in the data folder next to Start-FocusQuest.cmd. A dated copy is kept for the last 14 days.' : 'Everything is saved in this browser.'}</p>
+      <p class="lead">${SERVED ? 'Everything is saved in the data folder next to Start-FocusQuest.cmd. A dated copy is kept for the last 14 days.' : 'Everything is saved in this browser. Clearing the browsing data of this browser deletes it, so save a backup file now and then.'}</p>
       <div class="row wrap"><button class="btn" data-act="export">Save a backup file</button><button class="btn" data-act="import-file">Restore from a backup file</button>${SERVED ? `<button class="btn quiet" data-act="quit">Stop the helper</button>` : ''}</div>
       <input type="file" id="imp-file" accept="application/json,.json" hidden>
     </div>`;
@@ -1167,6 +1168,8 @@ function renderAll() { applyTheme(); renderPlayer(); renderRailFoot(); renderMai
 
 async function start() {
   wire();
+  // Without the helper the data lives in browser storage only: ask the browser not to evict it.
+  if (!SERVED && navigator.storage && navigator.storage.persist) { try { navigator.storage.persist(); } catch (e) { /* optional */ } }
   try { await loadState(); }
   catch (e) {
     loadFailed = true;

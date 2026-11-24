@@ -1,0 +1,14 @@
+{
+  "name": "FocusQuest",
+  "short_name": "FocusQuest",
+  "description": "A to-do board that rewards you for getting things done.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#171C38",
+  "theme_color": "#171C38",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}

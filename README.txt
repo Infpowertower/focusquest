@@ -22,6 +22,22 @@ and the FocusQuest entry in the Start menu (right-click > Open file location > d
 Without the installer: put the extracted folder somewhere you can write to, for example
 Documents\FocusQuest, and double-click Start-FocusQuest.cmd.
 
+BROWSER VERSION (no scripts, no Jira)
+------------------------------------
+If your PC does not run the scripts (see "is not digitally signed" below), or you only
+need the to-dos, use FocusQuest in the browser:
+
+  https://infpowertower.github.io/focusquest/
+
+In Edge choose  ... > Apps > Install this site as an app  (Chrome: ... > Cast, save and
+share > Install page as app). FocusQuest then has its own window and a Start menu entry,
+works offline and updates itself. Alternatively double-click app.html in this folder.
+
+In the browser version Jira is switched off, and your data is kept in the browser instead
+of a file. Clearing the browsing data deletes it: use Settings > "Save a backup file"
+now and then.
+
+
 If Windows shows a security warning for the downloaded files: right-click the zip file
 before extracting, choose Properties, tick "Unblock", then extract again.
 
@@ -73,6 +89,14 @@ To-do to ticket  open the to-do > "Create Jira ticket from this". Choose a templ
 
 IF SOMETHING DOES NOT WORK
 --------------------------
+"... is not digitally signed"  Your company only allows signed PowerShell scripts.
+ ("ist nicht digital signiert")  Run this in PowerShell to see the policy:
+                                   Get-ExecutionPolicy -List
+                                 MachinePolicy or UserPolicy "RemoteSigned": only downloaded
+                                 scripts are blocked. Right-click the zip file > Properties >
+                                 tick "Unblock" (Zulassen) > extract again.
+                                 "AllSigned": the scripts cannot run until your IT department
+                                 signs or approves them. Use the browser version (see above).
 Helper window closes at once     Your company may block PowerShell scripts. Open PowerShell
                                  in this folder and run:
                                    powershell -ExecutionPolicy Bypass -File .\server.ps1

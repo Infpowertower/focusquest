@@ -32,8 +32,18 @@ jobs:
             echo "Non-ASCII bytes found (Windows PowerShell 5.1 would misread them)"; exit 1
           fi
 
-      - name: Build app.html
-        run: node dev/build.js
+      - name: Build app.html and the browser version
+        run: node dev/build.js --web
+
+      - name: Test the browser version
+        run: |
+          npm install --no-save playwright@1
+          npx playwright install --with-deps chromium
+          node dev/test-web.js
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/
 
       - name: Assemble zip
         env:
@@ -132,6 +142,32 @@ jobs:
           $p.Kill()
           Write-Host 'Helper OK'
 
+  # Publishes the browser version. Skipped until GitHub Pages is switched on
+  # (repository Settings > Pages > Source: GitHub Actions).
+  pages:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Is GitHub Pages switched on?
+        id: enabled
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/pages" > /dev/null 2>&1; then
+            echo "on=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::GitHub Pages is not switched on, the browser version was not published."
+          fi
+      - uses: actions/deploy-pages@v4
+        id: deploy
+        if: steps.enabled.outputs.on == 'true'
+
   release:
     needs: [build, installer-test]
     runs-on: ubuntu-latest
@@ -154,6 +190,8 @@ jobs:
           **Update:** do the same again. Your data in the `data` folder is kept.
 
           If Windows warns about the downloaded files: right-click the zip file, choose Properties, tick "Unblock", then extract.
+
+          **PC only runs signed PowerShell scripts?** Use the browser version at https://infpowertower.github.io/focusquest/ (to-dos only, no Jira), or double-click `app.html` from the zip.
           NOTES
           sed -i "s/^ *//; s/VERSION/$VERSION/" notes.md
           gh release create "v$VERSION" dist/* \
