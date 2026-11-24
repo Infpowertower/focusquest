@@ -258,3 +258,30 @@ jobs:
             --target "$GITHUB_SHA" \
             --title "FocusQuest $VERSION" \
             --notes-file "$RUNNER_TEMP/notes.md"
+
+  # After the release: the release before this one updates itself to it through the real GitHub.
+  # Informational only, the release is already published at this point.
+  live-update:
+    needs: [build, release]
+    if: github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    continue-on-error: true
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@v4
+      - name: Previous release updates itself to this one
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tags = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=5" --jq '.[].tag_name'
+          $prev = @($tags | Where-Object { $_ -ne "v$env:VERSION" })[0]
+          if (-not $prev) { Write-Host 'There is no earlier release.'; exit 0 }
+          gh release download $prev --repo $env:GITHUB_REPOSITORY --pattern '*.zip' --dir prev
+          Expand-Archive -LiteralPath (Get-ChildItem prev\*.zip)[0].FullName -DestinationPath prev\x
+          $dir = (Resolve-Path prev\x\FocusQuest).Path
+          & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File dev\test-live-update.ps1 -Dir $dir -Expect $env:VERSION
+          if ($LASTEXITCODE -ne 0) { throw 'The live update failed.' }

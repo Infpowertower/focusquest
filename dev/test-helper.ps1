@@ -199,7 +199,9 @@ try {
     # ------------------------------------------------------------ copy fails midway
     Set-Scenario 'good'
     $before = Get-Hashes
-    $lock = [System.IO.File]::Open((Join-Path $Install 'Start-FocusQuest.cmd'), 'Open', 'Read', 'None')
+    # Others may still read this file (so the copy of the current version works) but not replace it:
+    # app.html and server.ps1 are already overwritten when the update reaches it.
+    $lock = [System.IO.File]::Open((Join-Path $Install 'Start-FocusQuest.cmd'), 'Open', 'Read', 'Read')
     try { $c = Call 'POST' '/api/update/apply' } finally { $lock.Close() }
     Write-Host "      helper said: $($c.text)"
     Check ($c.status -eq 500 -and $c.text -match 'put back') 'a file cannot be replaced: update stops'
