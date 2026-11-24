@@ -1,0 +1,6 @@
+data/
+app.html
+dev/data.json
+tests/data.json
+node_modules/
+*.tmp
