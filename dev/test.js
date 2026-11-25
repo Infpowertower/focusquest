@@ -266,7 +266,13 @@ const PORT = +process.env.FQ_PORT || 8765, JPORT = +process.env.FQ_JIRA_PORT || 
     await page.click(row + ' .ibody');
     await page.waitForSelector('#tr-area .help:has-text("can be closed when they are done")');
     assert.equal(await page.locator('#tr-area button:has-text("Done")').count(), 0);
-    assert.match(await page.textContent('#kids-sect'), /Tickets in this epic\s*1 of 2 done.*OPS-111.*not on my board.*OPS-112/s);
+    assert.match(await page.textContent('#kids-sect'), /Tickets in this epic\s*1 open.*OPS-111.*not on my board/s);
+    assert.equal(await page.locator('#kids-sect .kid').count(), 1, 'the done one is hidden');
+    await page.click('[data-act=kids-toggle]:has-text("Show 1 done")');
+    assert.match(await page.textContent('#kids-sect'), /OPS-111.*OPS-112.*Hide the done ones/s);
+    await page.click('[data-act=kids-toggle]');
+    assert.equal(await page.locator('#kids-sect .kid').count(), 1);
+    assert.equal(await page.locator('#drawer [data-act=new-subtask]').count(), 0);
     await shot('14-epic');
     await page.click('.kid:has-text("OPS-111")');
     await page.waitForSelector('#drawer a.key:has-text("OPS-111")');
@@ -322,7 +328,100 @@ const PORT = +process.env.FQ_PORT || 8765, JPORT = +process.env.FQ_JIRA_PORT || 
     await page.waitForFunction(() => kids(ticketByKey('OPS-110').jira).length === 3 && holdsOpen(ticketByKey('OPS-110')));
     await page.waitForFunction(() => /Part of\s*OPS-110/.test(document.querySelector('#drawer').textContent));
   });
+  await step('order by hand: drag within a priority, into another priority, with the keyboard', async () => {
+    await page.click('[data-act=close-drawer]');
+    const order = p => page.evaluate(p => viewOpen().filter(i => i.prio === p).sort(cmpPrio).map(i => itemTitle(i)), p);
+    const before = await order(2);
+    assert.ok(before.length >= 3, 'needs three medium rows');
+    const row = t => `#list .item:has(.title:text-is("${t}"))`;
+    // the last medium row goes to the top of medium
+    await page.dragAndDrop(row(before[before.length - 1]) + ' .ibody', row(before[0]), { targetPosition: { x: 200, y: 4 } });
+    let now = await order(2);
+    assert.equal(now[0], before[before.length - 1]); assert.equal(now[1], before[0]);
+    assert.deepEqual(await page.$$eval('#list .group[data-prio="2"] .item .title', els => els.map(e => e.textContent)), now, 'the list shows the new order');
+    // a row dropped below a high-priority row becomes high priority
+    const high = await order(1), moved = now[now.length - 1];
+    await page.dragAndDrop(row(moved) + ' .ibody', row(high[0]), { targetPosition: { x: 200, y: 40 } });
+    assert.deepEqual((await order(1)).slice(0, 2), [high[0], moved]);
+    assert.equal(await page.evaluate(t => S.items.find(i => itemTitle(i) === t).prio, moved), 1);
+    // low priority is empty and only shows while dragging; dropping there works too
+    assert.equal(await page.locator('#list .group[data-prio="3"]').isVisible(), false);
+    await page.hover(row(moved) + ' .ibody'); await page.mouse.down(); await page.mouse.move(600, 500, { steps: 5 });
+    const low = page.locator('#list .group[data-prio="3"] .items');
+    await low.waitFor({ state: 'visible' });
+    const box = await low.boundingBox();
+    await page.mouse.move(box.x + 100, box.y + 20, { steps: 5 }); await page.mouse.up();
+    assert.equal(await page.evaluate(t => S.items.find(i => itemTitle(i) === t).prio, moved), 3);
+    // keyboard: Alt + arrow up moves it to the end of medium
+    await page.focus(row(moved) + ' .ibody');
+    await page.keyboard.press('Alt+ArrowUp');
+    now = await order(2);
+    assert.equal(now[now.length - 1], moved);
+    await page.keyboard.press('Alt+ArrowUp');
+    assert.equal((await order(2))[now.length - 2], moved);
+    assert.ok(await page.evaluate(() => document.activeElement.classList.contains('ibody')), 'the row keeps the keyboard focus');
+  });
+  await step('contexts: create, carousel, add with #name, drag onto a context, set in the details', async () => {
+    assert.equal(await page.locator('#ctxbar').count(), 0, 'no carousel before the first context');
+    await page.click('.toolbar [data-act=ctx-new]');
+    await page.fill('#cx-name', 'Web shop'); await page.press('#cx-name', 'Enter');
+    await page.waitForSelector('#ctxbar .ctx.on:has-text("Web shop")');
+    assert.match(await page.textContent('#now'), /Nothing is waiting in Web shop/);
+    assert.equal(await page.locator('#list .item').count(), 0);
+    const shop = await page.evaluate(() => S.contexts[0].id);
+    // a new to-do lands in the open context; #name picks or creates another one
+    await page.fill('#q', 'Design the banner'); await page.press('#q', 'Enter');
+    await page.fill('#q', 'Renew the wildcard certificate #infra-team !1');
+    assert.match(await page.textContent('#qhint'), /in the new context "infra team"/);
+    await page.press('#q', 'Enter');
+    await page.waitForSelector('.toast:has-text("Added to infra team")');
+    await page.fill('#q', 'Check the checkout flow #web-shop');
+    assert.match(await page.textContent('#qhint'), /in Web shop/);
+    await page.press('#q', 'Enter');
+    assert.deepEqual(await page.evaluate(() => S.contexts.map(c => [c.name, S.items.filter(i => i.ctx === c.id).map(i => i.title).sort().join('|')])),
+      [['Web shop', 'Check the checkout flow|Design the banner'], ['infra team', 'Renew the wildcard certificate']]);
+    assert.match(await page.textContent('#ctxbar'), /Everything\s*\d+ open.*Web shop\s*2 open.*infra team\s*1 open.*No context\s*\d+ open/s);
+    assert.equal(await page.locator('#list .item').count(), 2, 'only the open context is listed');
+    assert.match(await page.textContent('#now h2'), /Design the banner|Check the checkout flow/);
+    await shot('16-contexts');
+    // drag a row from "Everything" onto a context
+    await page.click('#ctxbar .ctx[data-ctx=all] .ctx-main');
+    await page.dragAndDrop('#list .item:has-text("Book room for sprint review") .ibody', `#ctxbar .ctx[data-ctx="${shop}"]`);
+    await page.waitForSelector('.toast:has-text("Moved to Web shop")');
+    assert.equal(await page.evaluate(() => S.items.find(i => i.title === 'Book room for sprint review').ctx), shop);
+    // and back out again by dropping it on "No context"
+    await page.dragAndDrop('#list .item:has-text("Book room for sprint review") .ibody', '#ctxbar .ctx[data-ctx=none]');
+    assert.equal(await page.evaluate(() => S.items.find(i => i.title === 'Book room for sprint review').ctx), null);
+    // in the details: for a to-do and for a ticket, also with a context that does not exist yet
+    await page.click('#list .item:has-text("Book room for sprint review") .ibody');
+    await page.selectOption('#d-ctx', { label: 'infra team' });
+    assert.equal(await page.evaluate(() => ctxById(S.items.find(i => i.title === 'Book room for sprint review').ctx).name), 'infra team');
+    await page.click('#list .item:has-text("mailbox quota") .ibody');
+    await page.click('#drawer details.plan summary');
+    await page.selectOption('#d-ctx', '__new');
+    await page.fill('#cx-name', 'Mail'); await page.click('#cx-ok');
+    await page.waitForFunction(() => { const c = ctxByName('Mail'); return c && ticketByKey('OPS-102').ctx === c.id; });
+    // a sub-ticket opened from a ticket joins that ticket's context
+    await page.click('#kids-sect .kid:has-text("OPS-106")');
+    await page.waitForSelector('#drawer a.key:has-text("OPS-106")');
+    assert.equal(await page.evaluate(() => ctxById(ticketByKey('OPS-106').ctx).name), 'Mail');
+    // rename and delete
+    await page.click('[data-act=close-drawer]');
+    await page.click(`#ctxbar .ctx[data-ctx="${shop}"] .ctx-main`);
+    await page.click('#ctxbar .ctx.on .ctx-edit');
+    await page.fill('#cx-name', 'Mail'); await page.click('#cx-ok');
+    assert.match(await page.textContent('#cx-err'), /already a context "Mail"/);
+    await page.fill('#cx-name', 'Shop'); await page.click('#cx-ok');
+    await page.waitForSelector('#ctxbar .ctx.on:has-text("Shop")');
+    await page.click('#ctxbar .ctx.on .ctx-edit');
+    await page.click('#cx-del'); await page.click('#cf-ok');
+    assert.deepEqual(await page.evaluate(() => [S.contexts.map(c => c.name), S.settings.ctx, S.items.filter(i => i.title === 'Design the banner')[0].ctx]), [['infra team', 'Mail'], 'all', null]);
+    await page.waitForTimeout(600); await page.evaluate(() => flush());
+    await page.reload(); await page.waitForSelector('#ctxbar');
+    assert.equal(await page.evaluate(() => S.contexts.length), 2);
+  });
   await step('refresh shows activity by others', async () => {
+    if (await page.locator('[data-act=close-drawer]').count() === 0) await page.click('.item:has-text("mailbox quota") .ibody');
     await page.click('[data-act=close-drawer]');
     await fetch(`http://localhost:${JPORT + 1}/`);
     await page.click('#refall');
@@ -407,12 +506,52 @@ const PORT = +process.env.FQ_PORT || 8765, JPORT = +process.env.FQ_JIRA_PORT || 
     await page.fill('#s-tat', ''); await page.locator('#s-tat').blur();
     await page.click('[data-view=board]');
   });
+  await step('diagnostics: the log in the app', async () => {
+    await page.evaluate(() => fetchIssue('OPS-999').catch(() => toast('Test problem for the log', { kind: 'bad' })));
+    await page.waitForSelector('.toast.bad:has-text("Test problem")');
+    await page.click('[data-view=settings]');
+    await page.click('[data-act=diag]');
+    await page.waitForFunction(() => /What the helper did/.test((document.querySelector('#dg-text') || {}).value || ''));
+    const log = await page.inputValue('#dg-text');
+    assert.match(log, /Page version: 1\.0\.0\s+Helper version: 1\.0\.0\s+Mode: helper/);
+    assert.match(log, /jira POST rest\/api\/2\/issue\/OPS-103\/comment -> 201/);
+    assert.match(log, /jira GET rest\/api\/2\/issue\/OPS-999 -> 404/);
+    assert.match(log, /shown to you: Test problem for the log/);
+    assert.match(log, /page opened[\s\S]*page opened/, 'the log survives a reload');
+    assert.match(log, /FocusQuest helper \(test stand-in\) starting/);
+    assert.ok(!/testtoken|devsecret|localhost:8799|Certificate ordered|TLS certificate/i.test(log.replace(/Renew the wildcard certificate/g, '')), 'no token, no Jira address, no ticket texts');
+    await page.click('[data-act=diag-copy]');
+    await page.waitForSelector('[data-act=diag-copy]:has-text("Copied")');
+    await page.click('.overlay [data-act=modal-close]');
+    await page.click('[data-view=board]');
+  });
+  await step('new files but the old helper is still running: said plainly, fixed with one click', async () => {
+    // files of 1.0.5 on disk, a helper from before the autostart switch still running
+    await page.evaluate(() => api('POST', '/api/test/page-version', { v: '1.0.5', old: true }));
+    await page.reload(); await page.waitForSelector('#q');
+    assert.match(await page.textContent('#railfoot'), /The helper is still version 1\.0\.0\. Restart it/);
+    await page.click('[data-view=settings]');
+    await page.check('#s-autostart');
+    await page.waitForSelector('.toast.bad:has-text("older than this page")');
+    assert.equal(await page.isChecked('#s-autostart'), false);
+    await Promise.all([page.waitForNavigation({ timeout: 20000 }), page.click('#railfoot [data-act=helper-restart]')]);
+    await page.waitForSelector('#q');
+    assert.equal(await page.evaluate(() => meta.version), '1.0.5');
+    assert.equal(await page.locator('#railfoot [data-act=helper-restart]').count(), 0);
+    // the other way round: an old page in a tab, a newer helper running
+    await page.evaluate(() => api('POST', '/api/test/page-version', { v: '1.0.4' }));
+    await page.reload(); await page.waitForSelector('#q');
+    assert.match(await page.textContent('#railfoot'), /FocusQuest 1\.0\.5 is running\. Reload this page/);
+    await page.evaluate(() => api('POST', '/api/test/page-version', { v: '' }));
+    await page.reload(); await page.waitForSelector('#q');
+    assert.equal(await page.locator('#railfoot .conn.bad').count(), 0);
+  });
   await step('update: quiet notice, notes, install, restart', async () => {
     await page.waitForSelector('.conn.upd');               // found by the automatic check after the start
     await page.click('[data-view=settings]');
-    assert.match(await page.textContent('#upd-state'), /You have version 1\.0\.0\. Version 1\.1\.0 is available/);
+    assert.match(await page.textContent('#upd-state'), /You have version 1\.0\.5\. Version 1\.1\.0 is available/);
     // a check that fails is one quiet line, nothing else
-    await page.route('**/api/update/check*', r => r.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: false, available: false, current: '1.0.0', latest: '', notes: '', message: 'GitHub could not be reached: test', checkedAt: new Date().toISOString() }) }));
+    await page.route('**/api/update/check*', r => r.fulfill({ contentType: 'application/json', body: JSON.stringify({ ok: false, available: false, current: '1.0.5', latest: '', notes: '', message: 'GitHub could not be reached: test', checkedAt: new Date().toISOString() }) }));
     await page.click('[data-act=update-check]');
     await page.waitForFunction(() => /did not work\. GitHub could not be reached/.test(document.querySelector('#upd-state').textContent));
     assert.equal(await page.locator('.conn.upd, .toast.bad').count(), 0);
@@ -422,7 +561,7 @@ const PORT = +process.env.FQ_PORT || 8765, JPORT = +process.env.FQ_JIRA_PORT || 
     assert.match(await page.textContent('#railfoot'), /Version 1\.1\.0 is available/);
     await page.click('.conn.upd');
     const txt = await page.textContent('.overlay .modal');
-    assert.match(txt, /FocusQuest 1\.1\.0 is available/); assert.match(txt, /You have version 1\.0\.0\. Published 20 November 2026/);
+    assert.match(txt, /FocusQuest 1\.1\.0 is available/); assert.match(txt, /You have version 1\.0\.5\. Published 20 November 2026/);
     assert.match(txt, /Ticket forms for several projects/); assert.ok(!/Download the zip/.test(txt), 'install instructions are left out');
     await shot('13-update');
     const n = await page.evaluate(() => S.items.length);

@@ -1,9 +1,25 @@
 'use strict';
 /* FocusQuest - everything runs locally in this page. The helper (server.ps1) stores the data and relays Jira calls. */
 const TOKEN = '__FQ_TOKEN__';
+const APP_VERSION = '__FQ_VERSION__';   // stamped by the build. The helper reports its own version: they have to match.
 const SERVED = /^http/.test(location.protocol) && TOKEN.indexOf('__FQ') !== 0;
 // Browser version: the page is hosted on a website instead of being served by the helper.
 const WEB = !SERVED && /^http/.test(location.protocol);
+
+/* ------------------------------------------------------------------ diagnostics log (Settings, Diagnostics) */
+/* What the page did, kept in memory only: calls with their status, errors, decisions. No ticket texts, no token. */
+/* It lives as long as the browser tab (it survives a reload), so that it is still there after "it broke, I reloaded". */
+let DBG = [];
+try { DBG = JSON.parse(sessionStorage.getItem('fq-log') || '[]'); if (!Array.isArray(DBG)) DBG = []; } catch (e) { DBG = []; }
+function dbg(msg) {
+  const d = new Date(), two = n => String(n).padStart(2, '0');
+  DBG.push(`${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}  ${String(msg).replace(/\s+/g, ' ').slice(0, 400)}`);
+  if (DBG.length > 400) DBG.splice(0, DBG.length - 400);
+  try { sessionStorage.setItem('fq-log', JSON.stringify(DBG)); } catch (e) { /* the log then lives until the next reload */ }
+}
+dbg(`page opened (${/^\d/.test(APP_VERSION) ? APP_VERSION : 'no version'})`);
+window.addEventListener('error', e => dbg(`script error: ${e.message} (${String(e.filename || '').split('/').pop()}:${e.lineno})`));
+window.addEventListener('unhandledrejection', e => dbg(`unhandled: ${(e.reason && e.reason.message) || e.reason}`));
 
 /* ------------------------------------------------------------------ small helpers */
 const $ = (s, r = document) => r.querySelector(s);
@@ -53,11 +69,13 @@ function defaults() {
     game: { xp: 0, log: [], streak: { count: 0, last: null, best: 0 }, counts: {}, days: {}, badges: {} },
     settings: {
       sound: true, motion: true, theme: 'auto', sort: 'prio', dayRemindTime: '09:00', refreshMin: 15, updateCheck: true,
-      timeAuto: true, timeAsk: true, timeAskTypes: [], timeAskSubs: true, timeJira: false,
+      ctx: 'all', timeAuto: true, timeAsk: true, timeAskTypes: [], timeAskSubs: true, timeJira: false,
       jql: 'assignee = currentUser() AND resolution = Unresolved ORDER BY updated DESC'
     },
     // forms: one per kind of ticket you create (Jira project + ticket type + its fields). Templates belong to a form.
     ticketCfg: { forms: [], defaultForm: '', templates: [] },
+    // contexts (topics): { id, name }. An item belongs to one through item.ctx. settings.ctx is the one shown on the board.
+    contexts: [],
     // working time. open: the running period { start }. beat: last moment the page was alive while tracking.
     // spans: finished periods { id, day, s, e } in minutes of that day. ticket: running ticket timer { itemId, start }.
     // log: time booked on tickets { id, itemId, key, summary, day, min, note, at, wl }.
@@ -98,7 +116,9 @@ function upgrade(raw) {
 }
 /* After loading or restoring: guarantees the shape the rest of the code relies on. */
 function normalize() {
-  for (const it of S.items) { if (!it.steps) it.steps = []; if (!it.prio) it.prio = 2; }
+  S.contexts = S.contexts.filter(c => c && c.id && c.name);
+  for (const it of S.items) { if (!it.steps) it.steps = []; if (!it.prio) it.prio = 2; if (it.ctx && !S.contexts.some(c => c.id === it.ctx)) it.ctx = null; }
+  if (S.settings.ctx !== 'all' && S.settings.ctx !== 'none' && !S.contexts.some(c => c.id === S.settings.ctx)) S.settings.ctx = 'all';
   const c = S.ticketCfg;
   c.forms = c.forms.filter(f => f && typeof f === 'object');
   if (!c.forms.length) c.forms.push(defaultForm());
@@ -109,9 +129,26 @@ function normalize() {
   const d = S.game.days[today()];
   if (d && !d.n) { d.n = {}; for (const e of S.game.log) if (dstr(new Date(e.t)) === today()) d.n[e.type] = (d.n[e.type] || 0) + 1; }
 }
+const ctxById = id => S.contexts.find(c => c.id === id);
+const ctxKey = s => String(s || '').toLowerCase().replace(/[^a-z0-9\u00e4\u00f6\u00fc\u00df]+/g, '');
+const ctxByName = name => S.contexts.find(c => ctxKey(c.name) === ctxKey(name));
+function addContext(name) {
+  name = String(name || '').trim().replace(/\s+/g, ' ').slice(0, 40);
+  if (!ctxKey(name)) return null;
+  let c = ctxByName(name);
+  if (!c) { c = { id: 'ctx_' + uid(), name }; S.contexts.push(c); }
+  return c;
+}
+/* the context of new things: the one that is open on the board, if it is a real one */
+const curCtxId = () => (ctxById(S.settings.ctx) ? S.settings.ctx : null);
+const inCtx = it => S.settings.ctx === 'all' || !S.contexts.length ? true : S.settings.ctx === 'none' ? !it.ctx : it.ctx === S.settings.ctx;
 const formById = id => S.ticketCfg.forms.find(f => f.id === id);
 const defForm = () => formById(S.ticketCfg.defaultForm) || S.ticketCfg.forms[0];
 const formLabel = f => f.name || (f.project ? `${f.type} in ${f.project}` : f.type);
+
+/* The page comes from the files on disk, the helper is a running program: after an update by hand the old helper
+   may still be running. Then routes the page needs are missing. */
+const versionClash = () => SERVED && /^\d/.test(APP_VERSION) && (meta.version || '') !== APP_VERSION;
 
 let S = defaults();
 let meta = { version: '', awakeSince: '', autostart: false, jira: { baseUrl: '', hasToken: false } };
@@ -124,13 +161,22 @@ let saveLoud = false;         // false while only the time heartbeat changed: ot
 const bc = ('BroadcastChannel' in window) ? new BroadcastChannel('focusquest') : null;
 
 async function api(method, path, body) {
-  const r = await fetch(path, {
-    method, headers: { 'X-FQ-Token': TOKEN, 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body)
-  });
+  const routine = /^\/api\/(data|state|log)/.test(path);       // saving and the heartbeat: only logged when they fail
+  let r;
+  try {
+    r = await fetch(path, {
+      method, headers: { 'X-FQ-Token': TOKEN, 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+  } catch (e) { dbg(`helper ${method} ${path} did not answer: ${e.message}`); throw e; }
   const t = await r.text();
   let j = null; try { j = t ? JSON.parse(t) : null; } catch (e) { /* not json */ }
-  if (!r.ok) throw new Error((j && j.errorMessages && j.errorMessages[0]) || `The helper answered with status ${r.status}.`);
+  if (!r.ok) {
+    const msg = (j && j.errorMessages && j.errorMessages[0]) || `The helper answered with status ${r.status}.`;
+    dbg(`helper ${method} ${path} -> ${r.status} ${msg}`);
+    const err = new Error(msg); err.status = r.status; throw err;
+  }
+  if (!routine) dbg(`helper ${method} ${path} -> ${r.status}`);
   return j;
 }
 
@@ -148,7 +194,11 @@ async function flush() {
   clearTimeout(saveTimer); saveTimer = null;
   try {
     await api('PUT', '/api/data', S);
-    if (helperDown) { helperDown = false; renderRailFoot(); }
+    if (helperDown) {
+      helperDown = false; renderRailFoot();
+      // the helper is back: it may be another version than before
+      api('GET', '/api/state').then(st => { meta.version = st.version || ''; meta.autostart = !!st.autostart; meta.awakeSince = st.awakeSince || ''; renderRailFoot(); }).catch(() => { });
+    }
     if (bc && saveLoud) bc.postMessage({ rev: S.rev });
     saveLoud = false;
   } catch (e) {
@@ -162,6 +212,7 @@ async function loadState() {
   if (SERVED) {
     meta = await api('GET', '/api/state');
     if (!meta.version) meta.version = '';
+    if (versionClash()) dbg(`version clash: page ${APP_VERSION}, helper ${meta.version || 'unknown (older)'}`);
     const r = await fetch('/api/data', { headers: { 'X-FQ-Token': TOKEN } });
     const t = await r.text();
     if (!r.ok) throw new Error('The data file could not be read.');
@@ -212,10 +263,11 @@ function parseWhen(s) {
   return null;
 }
 function parseQuick(text) {
-  let prio = null, due = null, time = null; const words = [];
+  let prio = null, due = null, time = null, ctx = null; const words = [];
   for (const w of text.trim().split(/\s+/)) {
     let m;
     if ((m = /^[!pP]([123])$/.exec(w))) { prio = +m[1]; continue; }
+    if ((m = /^#(.*[^\d#].*)$/.exec(w)) && ctxKey(m[1])) { ctx = m[1].replace(/[-_]+/g, ' ').trim(); continue; }   // #shop, #web-shop. "#123" stays text
     if (w[0] === '@' && w.length > 1) {
       const r = parseWhen(w.slice(1));
       if (r) { if (r.date) due = r.date; if (r.time) time = r.time; continue; }
@@ -223,7 +275,7 @@ function parseQuick(text) {
     words.push(w);
   }
   if (time && !due) due = today();
-  return { title: words.join(' '), prio, due, time };
+  return { title: words.join(' '), prio, due, time, ctx };
 }
 
 /* ------------------------------------------------------------------ working time */
@@ -317,14 +369,18 @@ function ticketTimerStop(at, book = true) {
 }
 
 /* When did this PC session begin? The helper notices restarts and sleep; without it, the browser session counts. */
-let awakeCache = null, lastSync = 0;
+let awakeCache = null, lastSync = 0, awakeWarned = false;
 async function awakeSince(fresh) {
   if (!SERVED) {
     let t = null; try { t = +sessionStorage.getItem('fq-t0') || null; if (!t) { t = Date.now(); sessionStorage.setItem('fq-t0', String(t)); } } catch (e) { t = null; }
     return t || (awakeCache = awakeCache || Date.now());
   }
   if (!fresh && awakeCache) return awakeCache;
-  try { const st = await api('GET', '/api/state'); const t = new Date(st.awakeSince).getTime(); awakeCache = isNaN(t) ? null : t; return awakeCache; }
+  try {
+    const st = await api('GET', '/api/state'); const t = new Date(st.awakeSince).getTime();
+    if (isNaN(t) && !awakeWarned) { awakeWarned = true; dbg('working time: this helper does not report the PC session (older version), automatic start is off'); }
+    awakeCache = isNaN(t) ? null : t; return awakeCache;
+  }
   catch (e) { return null; }
 }
 /* Runs at the start and every few seconds: keeps the running period alive, ends it after the PC was off or asleep,
@@ -338,10 +394,12 @@ async function timeSync() {
   const gap = !!(T.open && T.beat && now - T.beat > GAP);
   let awake = (gap || slept || first) ? await awakeSince(true) : await awakeSince(false);
   if (awake === null) return;                               // helper not reachable: decide at the next round
-  if (gap && (!SERVED || awake > T.beat)) { timeStop(T.beat); changed = loud = true; }
+  if (gap && (!SERVED || awake > T.beat)) { dbg(`working time: period ended at the last sign of life ${new Date(T.beat).toLocaleTimeString()} (PC session since ${new Date(awake).toLocaleTimeString()})`); timeStop(T.beat); changed = loud = true; }
+  else if (gap) dbg('working time: the page was away, the PC stayed on, the period goes on');
   if (T.open) { if (gap || now - T.beat >= 55000) { T.beat = now; changed = true; } }
   else if (S.settings.timeAuto && T.autoFor !== String(awake)) {
     T.autoFor = String(awake);
+    dbg(`working time: started by itself (PC session since ${new Date(awake).toLocaleTimeString()})`);
     timeStart(Math.min(now, Math.max(awake, T.beat || 0)));
     changed = loud = true;
   }
@@ -441,6 +499,7 @@ function checkBadges() {
 function toast(msg, o = {}) {
   const el = document.createElement('div');
   el.className = 'toast ' + (o.kind || '');
+  if (o.kind === 'bad') dbg('shown to you: ' + (o.html ? String(msg).replace(/<[^>]+>/g, ' ') : msg));
   if (o.html) el.innerHTML = msg; else el.textContent = msg;
   if (o.actions) {
     const row = document.createElement('div'); row.className = 'row';
@@ -534,9 +593,10 @@ async function jira(method, path, body) {
       method, headers: { 'X-FQ-Token': TOKEN, 'Content-Type': 'application/json' },
       body: body === undefined ? undefined : JSON.stringify(body)
     });
-  } catch (e) { throw new JiraError('The FocusQuest helper is not running. Start it again with Start-FocusQuest.cmd.', 0); }
+  } catch (e) { dbg(`jira ${method} ${path.split('?')[0]} : the helper did not answer`); throw new JiraError('The FocusQuest helper is not running. Start it again with Start-FocusQuest.cmd.', 0); }
   const t = await r.text();
   let j = null; try { j = t ? JSON.parse(t) : null; } catch (e) { /* html or empty */ }
+  dbg(`jira ${method} ${path.split('?')[0]} -> ${r.status}${r.ok ? '' : ' ' + t.slice(0, 200)}`);
   if (r.ok) return j;
   let msg = '';
   if (j) msg = [...(j.errorMessages || []), ...Object.entries(j.errors || {}).map(([k, v]) => `${k}: ${v}`)].join(' ') || j.message || '';

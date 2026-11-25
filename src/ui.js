@@ -1,12 +1,14 @@
 /* ------------------------------------------------------------------ UI state */
-const UI = { view: 'board', tab: 'open', sel: null, drawerFor: null, planOpen: false, skipped: new Set(), capPrio: 2, tr: {}, refreshing: false, lastRefreshAll: Date.now(), day: today() };
+const verNum = v => String(v || '0').split('.').reduce((n, x) => n * 100000 + (+x || 0), 0);
+const UI = { kidsDone: new Set(), view: 'board', tab: 'open', sel: null, drawerFor: null, planOpen: false, skipped: new Set(), capPrio: 2, tr: {}, refreshing: false, lastRefreshAll: Date.now(), day: today() };
 let TF = null;       // ticket form state
 let TRX = null;      // transition dialog state
 
 const itemTitle = it => it.kind === 'ticket' && it.jira ? (it.jira.summary || it.jira.key) : it.title;
 const openItems = () => S.items.filter(i => !i.done);
 const byId = id => S.items.find(i => i.id === id);
-const cmpPrio = (a, b) => (a.prio - b.prio) || ((dueTs(a) || Infinity) - (dueTs(b) || Infinity)) || (a.createdAt - b.createdAt);
+const ordOf = i => (typeof i.ord === 'number' ? i.ord : Infinity);
+const cmpPrio = (a, b) => (a.prio - b.prio) || (ordOf(a) - ordOf(b)) || ((dueTs(a) || Infinity) - (dueTs(b) || Infinity)) || (a.createdAt - b.createdAt);
 const cmpDue = (a, b) => ((dueTs(a) || Infinity) - (dueTs(b) || Infinity)) || (a.prio - b.prio) || (a.createdAt - b.createdAt);
 
 function applyTheme() {
@@ -52,6 +54,11 @@ function renderRailFoot() {
   else if (helperDown) h = `<button class="conn bad" data-act="view" data-view="settings"><i></i>Helper not running. Start FocusQuest again.</button>`;
   else if (jiraReady()) h = `<button class="conn ok" data-act="view" data-view="settings"><i></i>Jira connected${me ? ' as ' + esc(me.displayName || me.name) : ''}</button>`;
   else h = `<button class="conn" data-act="view" data-view="settings"><i></i>Jira not connected. Set it up</button>`;
+  if (versionClash()) {
+    h = (verNum(meta.version) > verNum(APP_VERSION)
+      ? `<button class="conn bad" data-act="page-reload"><i></i>FocusQuest ${esc(meta.version)} is running. Reload this page</button>`
+      : `<button class="conn bad" data-act="helper-restart"><i></i>The helper is still ${meta.version ? 'version ' + esc(meta.version) : 'an older version'}. Restart it</button>`) + h;
+  }
   if (SERVED && UPD && UPD.available) h += `<button class="conn upd" data-act="update-open"><i></i>Version ${esc(UPD.latest)} is available</button>`;
   $('#railfoot').innerHTML = h;
 }
@@ -70,10 +77,12 @@ function renderBoard() {
     ${!SERVED && !WEB ? `<div class="banner">You opened app.html directly. To-dos, reminders and rewards work and are kept in this browser. For Jira and for a data file on disk, start FocusQuest with Start-FocusQuest.cmd.</div>` : ''}
     <form class="capture" id="capture" autocomplete="off">
       <input type="text" id="q" placeholder="What needs doing? Type it and press Enter" aria-label="New to-do">
+      ${S.contexts.length ? `<select id="cap-ctx" aria-label="Context for the new to-do" title="Context for the new to-do"><option value="">No context</option>${S.contexts.map(c => `<option value="${c.id}" ${c.id === curCtxId() ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>` : ''}
       <button type="button" class="pp p${UI.capPrio}" data-act="cap-prio" title="Priority for the new to-do. Click to change.">${PRIO[UI.capPrio]}</button>
       <button class="btn primary">Add</button>
     </form>
     <div class="hint" id="qhint"></div>
+    <div id="ctxwrap"></div>
     <section id="now" aria-label="Next thing to do"></section>
     <div class="toolbar">
       <div class="tabs" id="tabs"></div>
@@ -85,6 +94,7 @@ function renderBoard() {
         <button class="btn" data-act="import">Import tickets</button>
         <button class="btn" data-act="new-ticket">New ticket</button>
         <button class="btn" data-act="refresh-all" id="refall" title="Fetch the latest state of all open tickets from Jira">Refresh tickets</button>
+        ${S.contexts.length ? '' : `<button class="btn quiet" data-act="ctx-new" title="Gather what belongs together, for example everything for one product">New context</button>`}
       </div>
     </div>
     <div id="list"></div>`;
@@ -93,16 +103,17 @@ function renderBoard() {
 function renderHint() {
   const q = $('#q'), h = $('#qhint'); if (!q || !h) return;
   const v = q.value.trim();
-  if (!v) { h.innerHTML = 'While typing: <b>!1 !2 !3</b> sets the priority, <b>@today @tomorrow @fri @24.12. @14:30</b> sets the due date.'; return; }
+  if (!v) { h.innerHTML = `While typing: <b>!1 !2 !3</b> sets the priority, <b>@today @tomorrow @fri @24.12. @14:30</b> sets the due date${S.contexts.length ? ', <b>#name</b> the context' : ''}.`; return; }
   const p = parseQuick(v), bits = [];
   bits.push(PRIO[p.prio || UI.capPrio].toLowerCase() + ' priority');
   if (p.due) bits.push(dueInfo({ due: p.due, dueTime: p.time }).text.toLowerCase());
+  if (p.ctx) { const c = ctxByName(p.ctx); bits.push(c ? `in ${c.name}` : `in the new context "${p.ctx}"`); }
   h.innerHTML = p.title ? `Adds <b>${esc(p.title)}</b> with ${esc(bits.join(', '))}.` : 'Add a few words for the title.';
 }
 function refreshBoard() {
   updateTitle();
   if (UI.view !== 'board') return;
-  renderNow(); renderList();
+  renderCtxBar(); renderNow(); renderList();
 }
 function updateTitle() {
   const t = today(), n = openItems().filter(i => i.due && i.due <= t).length;
@@ -132,7 +143,7 @@ function metaHtml(it) {
 function nowItem() {
   const t = today(), urgent = i => (i.due && i.due <= t) ? 0 : 1;
   // a ticket with open sub-tickets is not a next step: the work is in the sub-tickets
-  let pool = openItems().filter(i => !holdsOpen(i)); if (!pool.length) pool = openItems();
+  let pool = viewOpen().filter(i => !holdsOpen(i)); if (!pool.length) pool = viewOpen();
   const c = pool.sort((a, b) => ((b.focus ? 1 : 0) - (a.focus ? 1 : 0)) || (urgent(a) - urgent(b)) || cmpPrio(a, b));
   if (!c.length) return null;
   let pick = c.find(i => !UI.skipped.has(i.id));
@@ -141,9 +152,9 @@ function nowItem() {
 }
 function renderNow() {
   const box = $('#now'); if (!box) return;
-  const it = nowItem(), n = openItems().length;
+  const it = nowItem(), n = viewOpen().length, cx = ctxById(S.settings.ctx);
   if (!it) {
-    box.innerHTML = `<div class="now empty"><h2>All clear</h2><p class="lead">Nothing is waiting. Add a to-do above, or import your Jira tickets.</p></div>`;
+    box.innerHTML = `<div class="now empty"><h2>All clear</h2><p class="lead">${cx ? `Nothing is waiting in ${esc(cx.name)}. Add a to-do above or drag something onto it.` : 'Nothing is waiting. Add a to-do above, or import your Jira tickets.'}</p></div>`;
     return;
   }
   const tk = it.kind === 'ticket';
@@ -163,7 +174,7 @@ function itemHtml(it) {
   const tk = it.kind === 'ticket';
   const hold = holdsOpen(it);
   const lab = it.done ? (tk ? 'Closed' : 'Mark as not done') : hold ? `Has ${nKids(openKids(it.jira).length)}` : (tk ? 'Close ticket' : 'Mark as done');
-  return `<li class="item p${it.prio}${it.done ? ' done' : ''}${UI.sel === it.id ? ' sel' : ''}" data-id="${it.id}">
+  return `<li class="item p${it.prio}${it.done ? ' done' : ''}${UI.sel === it.id ? ' sel' : ''}" data-id="${it.id}"${it.done ? '' : ' draggable="true"'}>
       <button class="check${tk ? ' tk' : ''}${hold ? ' hold' : ''}" data-act="toggle" aria-label="${lab}: ${esc(itemTitle(it))}" title="${lab}"></button>
       <button class="ibody" data-act="open"><span class="title">${esc(itemTitle(it))}</span><span class="meta">${metaHtml(it)}</span></button>
       ${it.done ? '' : `<button class="pp p${it.prio}" data-act="cycle-prio" title="Priority. Click to change.">${PRIO[it.prio]}</button>
@@ -172,7 +183,7 @@ function itemHtml(it) {
 }
 function renderList() {
   const box = $('#list'); if (!box) return;
-  const open = openItems(), done = S.items.filter(i => i.done);
+  const open = viewOpen(), done = viewItems().filter(i => i.done);
   const counts = { open: open.length, todo: open.filter(i => i.kind === 'todo').length, ticket: open.filter(i => i.kind === 'ticket').length, done: done.length };
   const names = { open: 'Open', todo: 'To-dos', ticket: 'Tickets', done: 'Done' };
   $('#tabs').innerHTML = Object.keys(names).map(k => `<button data-act="tab" data-tab="${k}" class="${UI.tab === k ? 'on' : ''}">${names[k]}<span>${counts[k]}</span></button>`).join('');
@@ -193,11 +204,12 @@ function renderList() {
         const t = today(), tm = dstr(addDays(new Date(), 1)), wk = dstr(addDays(new Date(), 7));
         const b = { 'Overdue': [], 'Today': [], 'Tomorrow': [], 'Next 7 days': [], 'Later': [], 'No due date': [] };
         for (const i of items) (!i.due ? b['No due date'] : i.due < t ? b['Overdue'] : i.due === t ? b['Today'] : i.due === tm ? b['Tomorrow'] : i.due <= wk ? b['Next 7 days'] : b['Later']).push(i);
-        for (const k in b) if (b[k].length) groups.push([k, b[k].sort(cmpDue)]);
+        for (const k in b) if (b[k].length) groups.push([k, b[k].sort(cmpDue), 0]);
       } else {
-        for (const p of [1, 2, 3]) { const g = items.filter(i => i.prio === p).sort(cmpPrio); if (g.length) groups.push([PRIO[p] + ' priority', g]); }
+        // all three priorities are there, so that a row can be dragged into an empty one (empty ones only show while dragging)
+        for (const p of [1, 2, 3]) groups.push([PRIO[p] + ' priority', items.filter(i => i.prio === p).sort(cmpPrio), p]);
       }
-      html = groups.map(([name, g]) => `<h3 class="group-h">${name}<small>${g.length}</small></h3><ul class="items">${g.map(itemHtml).join('')}</ul>`).join('');
+      html = groups.map(([name, g, p]) => `<div class="group${g.length ? '' : ' empty'}"${p ? ` data-prio="${p}"` : ''}><h3 class="group-h">${name}<small>${g.length}</small></h3><ul class="items">${g.map(itemHtml).join('')}</ul></div>`).join('');
     }
   }
   box.innerHTML = html;
@@ -207,13 +219,16 @@ function renderList() {
 function addTodo(text) {
   const p = parseQuick(text);
   if (!p.title) return false;
-  const it = { id: uid(), kind: 'todo', title: p.title, notes: '', prio: p.prio || UI.capPrio, due: p.due, dueTime: p.time, remind: null, remFired: null, steps: [], done: false, doneAt: null, createdAt: Date.now(), focus: false };
+  const sel = $('#cap-ctx'), made = p.ctx && !ctxByName(p.ctx);
+  const cx = p.ctx ? addContext(p.ctx) : (sel ? ctxById(sel.value) : null);
+  const it = { id: uid(), kind: 'todo', title: p.title, notes: '', prio: p.prio || UI.capPrio, due: p.due, dueTime: p.time, remind: null, remFired: null, steps: [], done: false, doneAt: null, createdAt: Date.now(), focus: false, ctx: cx ? cx.id : null };
   touchReminder(it);
   S.items.push(it);
   award('todoCreate', XP.todoCreate, 'Captured: ' + it.title);
   sound('add'); save();
   if (UI.tab === 'ticket' || UI.tab === 'done') UI.tab = 'open';
-  refreshBoard();
+  if (made) renderBoard(); else refreshBoard();           // a context made by "#name" brings the carousel along
+  if (!inCtx(it)) toast(cx ? `Added to ${cx.name}.` : 'Added without a context.', { ttl: 3500, actions: [{ label: 'Show it', fn: () => selectCtx(cx ? cx.id : 'none') }] });
   return true;
 }
 function completeTodo(it, el) {
@@ -291,6 +306,7 @@ function todoDrawer(it) {
   return `
     <div class="dhead"><span class="meta">To-do${it.done ? ', finished' : ''}</span><button class="x" data-act="close-drawer" aria-label="Close details">×</button></div>
     <textarea class="dtitle" data-ch="title" rows="2" aria-label="Title">${esc(it.title)}</textarea>
+    ${ctxSelectHtml(it)}
     ${planHtml(it)}
     <label class="f" for="step-new">Steps <small>break it into small pieces, each one earns XP</small></label>
     <ul class="steps">${it.steps.map(s => `<li class="${s.done ? 'done' : ''}" data-step="${s.id}"><input type="checkbox" data-ch="step" ${s.done ? 'checked' : ''} aria-label="${esc(s.text)}"><span>${esc(s.text)}</span><button class="x" data-act="step-del" aria-label="Remove step" style="font-size:18px">×</button></li>`).join('')}</ul>
@@ -323,8 +339,8 @@ function ticketDrawer(it) {
     ${par ? `<p class="help">Part of <button class="chip" data-act="open-key" data-key="${esc(par.key)}">${esc(par.key)}${par.summary ? ' ' + esc(par.summary) : ''}</button></p>` : ''}
     <dl class="facts"><dt>Assignee</dt><dd>${esc(j.assignee || 'Unassigned')}</dd><dt>Author</dt><dd>${esc(j.author || 'Unknown')}</dd></dl>
     <div id="tr-area">${trHtml(it)}</div>
-    <p class="help">${j.error ? `<span class="due over">The last refresh failed: ${esc(j.error)}</span> ` : ''}Refreshed ${esc(relTime(j.fetchedAt))}. <button class="chip" data-act="refresh-one">Refresh now</button></p>
-    <details class="plan" ${UI.planOpen ? 'open' : ''}><summary>My priority, due date and reminder</summary>${planHtml(it)}</details>
+    <p class="help">${j.error ? `<span class="due over">The last refresh failed: ${esc(j.error)}</span> ` : ''}Refreshed ${esc(relTime(j.fetchedAt))}. <button class="chip" data-act="refresh-one">Refresh now</button>${!j.subtask && !kids(j).length ? ` <button class="chip" data-act="${isEpicType(j.type) ? 'new-in-epic' : 'new-subtask'}">${isEpicType(j.type) ? 'New ticket in this epic' : 'New sub-task'}</button>` : ''}</p>
+    <details class="plan" ${UI.planOpen ? 'open' : ''}><summary>My context, priority, due date and reminder</summary>${ctxSelectHtml(it)}${planHtml(it)}</details>
     ${kidsHtml(it)}
     ${timeSectHtml(it)}
     <div class="sect"><h3>Description</h3><div class="rich">${desc || '<span class="help">No description.</span>'}</div></div>
@@ -366,11 +382,12 @@ function requireJira() {
 function newTicketItem(j) {
   return { id: uid(), kind: 'ticket', title: j.summary, notes: '', prio: 2, due: null, dueTime: null, remind: null, remFired: null, steps: [], done: j.statusCat === 'done', doneAt: j.statusCat === 'done' ? Date.now() : null, createdAt: Date.now(), focus: false, jira: j };
 }
-async function importKeys(keys) {
+async function importKeys(keys, ctx) {
   const ok = [], failed = [], had = [];
+  if (ctx === undefined) ctx = curCtxId();                    // by default: the context that is open on the board
   for (const key of keys) {
     if (ticketByKey(key)) { had.push(key); continue; }
-    try { const j = await fetchIssue(key); if (ticketByKey(j.key)) { had.push(j.key); continue; } S.items.push(newTicketItem(j)); ok.push(j.key); }
+    try { const j = await fetchIssue(key); if (ticketByKey(j.key)) { had.push(j.key); continue; } const n = newTicketItem(j); n.ctx = ctx || null; S.items.push(n); ok.push(j.key); }
     catch (e) { failed.push({ key, msg: e.message }); }
   }
   if (ok.length) { award('import', XP.import * ok.length, ok.length === 1 ? `Imported ${ok[0]}` : `Imported ${ok.length} tickets`, { lucky: false }); save(); refreshBoard(); }
@@ -744,11 +761,200 @@ async function tfCreate(btn) {
   closeModal(TF.w); TF = null;
   // the ticket above (parent or epic) lists the new one from now on
   const up = above && ticketByKey(above);
+  if (it.ctx === undefined) it.ctx = up ? (up.ctx || null) : curCtxId();
   if (up) refreshTicket(up, { own: true }).then(() => { save(); refreshBoard(); if (UI.sel) renderDrawer(); });
   award('ticketCreate', XP.ticketCreate, `Created ${j.key}`);
   confetti(90); sound('level');
   save(); refreshBoard(); openItem(it.id);
   toast(`${j.key} created in Jira.`, { ttl: 6000 });
+}
+
+/* ------------------------------------------------------------------ contexts (topics): the carousel above the list */
+const viewItems = () => S.items.filter(inCtx);
+const viewOpen = () => S.items.filter(i => !i.done && inCtx(i));
+function ctxBarHtml() {
+  if (!S.contexts.length) return '';
+  const open = openItems(), cur = S.settings.ctx;
+  const card = (id, name, n, real) => `<div class="ctx${cur === id ? ' on' : ''}" data-ctx="${id}">
+      <button class="ctx-main" data-act="ctx-sel" aria-pressed="${cur === id}"><b>${esc(name)}</b><span>${n} open</span></button>
+      ${real && cur === id ? `<button class="ctx-edit" data-act="ctx-edit" title="Rename or delete this context" aria-label="Rename or delete this context">✎</button>` : ''}
+    </div>`;
+  const none = open.filter(i => !i.ctx).length;
+  return `<div class="ctxbar" id="ctxbar" aria-label="Contexts">
+      <button class="ctx-arrow" data-act="ctx-scroll" data-dir="-1" aria-label="Show earlier contexts">‹</button>
+      <div class="ctxs" id="ctxs">
+        ${card('all', 'Everything', open.length, false)}
+        ${S.contexts.map(c => card(c.id, c.name, open.filter(i => i.ctx === c.id).length, true)).join('')}
+        ${none || cur === 'none' ? card('none', 'No context', none, false) : ''}
+        <button class="ctx add" data-act="ctx-new">New context</button>
+      </div>
+      <button class="ctx-arrow" data-act="ctx-scroll" data-dir="1" aria-label="Show more contexts">›</button>
+    </div>`;
+}
+function renderCtxBar() {
+  const box = $('#ctxwrap'); if (!box) return;
+  const old = $('#ctxs'), left = old ? old.scrollLeft : null;
+  box.innerHTML = ctxBarHtml();
+  const el = $('#ctxs'); if (!el) return;
+  if (left !== null) el.scrollLeft = left;
+  else { const on = $('.ctx.on', el); if (on && on.scrollIntoView) on.scrollIntoView({ block: 'nearest', inline: 'center' }); }
+  const more = el.scrollWidth > el.clientWidth + 4;
+  $$('.ctx-arrow', box).forEach(a => { a.hidden = !more; });
+}
+function selectCtx(id) {
+  S.settings.ctx = id; UI.skipped.clear();
+  save({ quiet: true });
+  if (UI.view !== 'board') { UI.view = 'board'; renderMain(); return; }
+  renderBoard();
+}
+function setCtx(it, id) {
+  const c = id ? ctxById(id) : null;
+  if ((it.ctx || null) === (c ? c.id : null)) return;
+  it.ctx = c ? c.id : null;
+  save(); refreshBoard(); if (UI.sel === it.id) renderDrawer();
+  toast(c ? `Moved to ${c.name}.` : 'Taken out of its context.', { ttl: 2500 });
+}
+/* name dialog for a new context, or to rename / delete one. done(context) runs after "Save". */
+function ctxDialog(c, done) {
+  const n = c ? S.items.filter(i => i.ctx === c.id).length : 0;
+  const w = modal(`<h2>${c ? 'Context' : 'New context'}</h2>
+    ${c ? '' : `<p class="lead">A context gathers what belongs together, for example everything for one product. Pick it above the list to see only that.</p>`}
+    <label class="f" for="cx-name">Name</label><input type="text" id="cx-name" maxlength="40" value="${c ? esc(c.name) : ''}" placeholder="For example: Web shop" autofocus>
+    <div id="cx-err"></div>
+    <div class="mfoot">${c ? `<button class="btn quiet danger left" id="cx-del">Delete</button>` : ''}<button class="btn" data-act="modal-close">Cancel</button><button class="btn primary" id="cx-ok">${c ? 'Save' : 'Create'}</button></div>`);
+  const ok = () => {
+    const name = $('#cx-name', w).value.trim().replace(/\s+/g, ' ');
+    if (!ctxKey(name)) { showErr('#cx-err', 'Give the context a name.', w); return; }
+    const other = ctxByName(name);
+    if (other && other !== c) { showErr('#cx-err', `There is already a context "${other.name}".`, w); return; }
+    let out = c;
+    if (c) c.name = name; else out = addContext(name);
+    save(); closeModal(w);
+    if (done) done(out); else { if (!c) S.settings.ctx = out.id; refreshBoard(); if (UI.view === 'board') renderBoard(); }
+  };
+  $('#cx-ok', w).onclick = ok;
+  $('#cx-name', w).addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); ok(); } });
+  if (c) $('#cx-del', w).onclick = () => {
+    closeModal(w);
+    confirmBox('Delete this context?', `"${c.name}" is removed. ${n ? `Its ${n === 1 ? 'item stays' : n + ' items stay'} on your board without a context.` : 'It is empty.'}`, 'Delete', () => {
+      S.contexts = S.contexts.filter(x => x !== c);
+      for (const i of S.items) if (i.ctx === c.id) i.ctx = null;
+      if (S.settings.ctx === c.id) S.settings.ctx = 'all';
+      save(); if (UI.view === 'board') renderBoard(); if (UI.sel) renderDrawer();
+    });
+  };
+}
+function ctxSelectHtml(it) {
+  return `<label class="f" for="d-ctx">Context</label>
+    <select id="d-ctx" data-ch="ctx"><option value="">No context</option>${S.contexts.map(c => `<option value="${c.id}" ${it.ctx === c.id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}<option value="__new">New context…</option></select>`;
+}
+
+/* ------------------------------------------------------------------ order by hand: drag and drop, Alt + arrow keys */
+function ensureOrd(prio) {
+  const g = openItems().filter(i => i.prio === prio).sort(cmpPrio);
+  g.forEach((x, n) => { x.ord = (n + 1) * 1000; });
+  return g;
+}
+/* puts an item into a priority, before or after another item of it (or at its end) */
+function moveItem(it, prio, ref, before) {
+  it.prio = prio; it.ord = undefined;
+  const g = ensureOrd(prio).filter(x => x !== it);
+  const i = ref ? g.indexOf(ref) : -1;
+  if (i < 0) it.ord = (g.length ? g[g.length - 1].ord : 0) + 1000;
+  else if (before) it.ord = ((i > 0 ? g[i - 1].ord : g[i].ord - 2000) + g[i].ord) / 2;
+  else it.ord = (g[i].ord + (i < g.length - 1 ? g[i + 1].ord : g[i].ord + 2000)) / 2;
+  save(); refreshBoard(); if (UI.sel === it.id) renderDrawer();
+}
+function dragClear(all) {
+  $$('.drop-before,.drop-after,.drop-in,.drop-on').forEach(e => e.classList.remove('drop-before', 'drop-after', 'drop-in', 'drop-on'));
+  if (all) $$('.dragging,.drag').forEach(e => e.classList.remove('dragging', 'drag'));
+}
+function wireDrag() {
+  document.addEventListener('dragstart', e => {
+    const li = e.target.closest ? e.target.closest('.item[draggable="true"]') : null; if (!li) return;
+    UI.drag = li.dataset.id;
+    e.dataTransfer.effectAllowed = 'move';
+    try { e.dataTransfer.setData('text/plain', itemTitle(byId(UI.drag))); } catch (err) { /* optional */ }
+    setTimeout(() => { li.classList.add('dragging'); const l = $('#list'), c = $('#ctxbar'); if (l) l.classList.add('drag'); if (c) c.classList.add('drag'); }, 0);
+  });
+  document.addEventListener('dragend', () => { UI.drag = null; dragClear(true); });
+  document.addEventListener('dragover', e => {
+    if (!UI.drag || !e.target.closest) return;
+    const card = e.target.closest('.ctx[data-ctx]'), grp = e.target.closest('.group[data-prio]');
+    if (card && card.dataset.ctx !== 'all') { e.preventDefault(); dragClear(); card.classList.add('drop-on'); return; }
+    if (!grp) { dragClear(); return; }
+    e.preventDefault(); dragClear();
+    const li = e.target.closest('.item');
+    if (li && li.dataset.id !== UI.drag) { const r = li.getBoundingClientRect(); li.classList.add(e.clientY < r.top + r.height / 2 ? 'drop-before' : 'drop-after'); }
+    else if (!li) grp.classList.add('drop-in');
+  });
+  document.addEventListener('drop', e => {
+    const it = UI.drag ? byId(UI.drag) : null; if (!it || !e.target.closest) return;
+    const card = e.target.closest('.ctx[data-ctx]'), grp = e.target.closest('.group[data-prio]');
+    if (card && card.dataset.ctx !== 'all') { e.preventDefault(); UI.drag = null; dragClear(true); setCtx(it, card.dataset.ctx === 'none' ? null : card.dataset.ctx); return; }
+    if (!grp) return;
+    e.preventDefault();
+    const li = e.target.closest('.item'), ref = li && li.dataset.id !== it.id ? byId(li.dataset.id) : null;
+    const r = li ? li.getBoundingClientRect() : null;
+    UI.drag = null; dragClear(true);
+    if (li && !ref) return;                                   // dropped on itself
+    moveItem(it, +grp.dataset.prio, ref, r ? e.clientY < r.top + r.height / 2 : false);
+  });
+  // the same with the keyboard: Alt + arrow up or down on a row
+  document.addEventListener('keydown', e => {
+    if (!e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') || !e.target.closest) return;
+    const li = e.target.closest('#list .item[draggable="true"]'); if (!li) return;
+    const it = byId(li.dataset.id), up = e.key === 'ArrowUp'; if (!it) return;
+    e.preventDefault();
+    const sib = up ? li.previousElementSibling : li.nextElementSibling;
+    if (sib) moveItem(it, it.prio, byId(sib.dataset.id), up);
+    else {
+      const p = it.prio + (up ? -1 : 1); if (p < 1 || p > 3) return;
+      const g = viewOpen().filter(x => x.prio === p && (UI.tab === 'open' || x.kind === UI.tab)).sort(cmpPrio);
+      moveItem(it, p, up ? null : (g[0] || null), true);     // up: to the end of the priority above; down: to the top of the one below
+    }
+    const b = $(`#list .item[data-id="${it.id}"] .ibody`); if (b) b.focus();
+  });
+}
+
+/* ------------------------------------------------------------------ diagnostics */
+async function diagText() {
+  const mask = t => { let h = ''; try { h = meta.jira.baseUrl ? new URL(meta.jira.baseUrl).host : ''; } catch (e) { h = ''; } return h ? String(t).split(h).join('<jira>') : String(t); };
+  const s = S.settings, T = S.time, n = k => S.items.filter(i => i.kind === k).length;
+  const out = [
+    `FocusQuest diagnostics, ${new Date().toString()}`,
+    `Page version: ${/^\d/.test(APP_VERSION) ? APP_VERSION : 'not stamped'}   Helper version: ${SERVED ? (meta.version || 'unknown (older than 1.0.8)') : 'no helper'}   Mode: ${SERVED ? 'helper' : WEB ? 'browser version' : 'file'}`,
+    versionClash() ? 'PAGE AND HELPER DO NOT MATCH: the helper that is running is not the one from the installed files.' : '',
+    `Browser: ${navigator.userAgent}`,
+    `Jira: ${meta.jira.baseUrl ? 'address set' : 'no address'}, ${meta.jira.hasToken ? 'token stored' : 'no token'}, ${me ? 'signed in' : 'not signed in yet'}`,
+    `Data: ${n('todo')} to-dos, ${n('ticket')} tickets, ${S.ticketCfg.forms.length} ticket forms, ${S.contexts.length} contexts, save number ${S.rev}`,
+    `Settings: updateCheck=${s.updateCheck} timeAuto=${s.timeAuto} timeAsk=${s.timeAsk} timeJira=${s.timeJira} refreshMin=${s.refreshMin} startWithWindows=${SERVED ? meta.autostart : 'n/a'}`,
+    `Working time: ${T.open ? 'running since ' + new Date(T.open.start).toLocaleString() : 'not running'}, last sign of life ${T.beat ? new Date(T.beat).toLocaleString() : 'never'}, PC session since ${meta.awakeSince ? new Date(meta.awakeSince).toLocaleString() : 'unknown'}`,
+    '', '--- What the page did (newest last) ---', ...DBG, '', '--- What the helper did (newest last) ---'
+  ].filter((l, i) => l !== '' || i > 7);
+  if (!SERVED) out.push('No helper in this mode.');
+  else {
+    try { const r = await api('GET', '/api/log'); out.push(...((r && r.lines) || [])); }
+    catch (e) { out.push(`The helper log could not be read: ${e.message}` + (e.status === 404 ? ' (this helper is older than the page)' : '')); }
+  }
+  return mask(out.join('\n'));
+}
+async function openDiag() {
+  const w = modal(`<h2>Diagnostics</h2>
+    <p class="lead">What FocusQuest did since this page was opened. It contains ticket keys and error messages, but no ticket texts, no token and not your Jira address.</p>
+    <textarea id="dg-text" rows="18" readonly spellcheck="false" aria-label="Log">Collecting…</textarea>
+    <div class="mfoot"><button class="btn left" data-act="diag-save">Save as a file</button><button class="btn" data-act="modal-close">Close</button><button class="btn primary" data-act="diag-copy">Copy</button></div>`, 'wide');
+  const t = await diagText(), ta = $('#dg-text', w);
+  if (ta) { ta.value = t; ta.scrollTop = ta.scrollHeight; }
+}
+/* after "restart the helper": wait until the helper of this page's version answers, then load the page fresh */
+async function awaitHelper(version, ms) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < ms) {
+    await new Promise(r => setTimeout(r, 1500));
+    try { const st = await api('GET', '/api/state'); if (st && (!version || st.version === version)) { location.reload(); return true; } } catch (e) { /* not back yet */ }
+  }
+  return false;
 }
 
 /* ------------------------------------------------------------------ working time: sidebar clock, hours view, day editor */
@@ -911,16 +1117,19 @@ const holdsOpen = it => it.kind === 'ticket' && it.jira && !it.done && openKids(
 const nKids = n => `${n} open sub-ticket${n === 1 ? '' : 's'}`;
 function kidsHtml(it) {
   const j = it.jira, list = kids(j), epic = isEpicType(j.type);
-  if (j.subtask) return '';
-  const done = list.filter(k => k.statusCat === 'done').length;
-  const missing = list.filter(k => k.statusCat !== 'done' && !ticketByKey(k.key)).length;
-  return `<div class="sect" id="kids-sect"><h3>${epic ? 'Tickets in this epic' : 'Sub-tasks'}${list.length ? ` <small>${done} of ${list.length} done</small>` : ''}</h3>
+  if (j.subtask || (!list.length && !j.kidsError)) return '';
+  const open = list.filter(k => k.statusCat !== 'done'), done = list.length - open.length, all = UI.kidsDone.has(it.id);
+  const missing = open.filter(k => !ticketByKey(k.key)).length;
+  const row = k => {
+    const on = ticketByKey(k.key);
+    return `<button class="kid${k.statusCat === 'done' ? ' done' : ''}" data-act="open-key" data-key="${esc(k.key)}" title="${on ? 'Open' : 'Add to my board and open'}"><span class="key">${esc(k.key)}</span><span class="grow">${esc(k.summary)}</span>${statusPill(k)}${on ? '' : '<span class="tag">not on my board</span>'}</button>`;
+  };
+  const shown = all ? list : open;
+  return `<div class="sect" id="kids-sect"><h3>${epic ? 'Tickets in this epic' : 'Sub-tasks'} <small>${open.length ? `${open.length} open` : 'all done'}</small></h3>
     ${j.kidsError ? `<p class="err">The tickets of this epic could not be loaded: ${esc(j.kidsError)}</p>` : ''}
-    ${list.length ? `<div class="kids">${list.map(k => {
-      const on = ticketByKey(k.key);
-      return `<button class="kid${k.statusCat === 'done' ? ' done' : ''}" data-act="open-key" data-key="${esc(k.key)}" title="${on ? 'Open' : 'Add to my board and open'}"><span class="key">${esc(k.key)}</span><span class="grow">${esc(k.summary)}</span>${statusPill(k)}${on ? '' : '<span class="tag">not on my board</span>'}</button>`;
-    }).join('')}</div>` : `<p class="help" style="margin-top:0">None yet.</p>`}
+    ${shown.length ? `<div class="kids">${shown.map(row).join('')}</div>` : ''}
     <div class="row wrap" style="margin-top:10px">
+      ${done ? `<button class="chip" data-act="kids-toggle">${all ? 'Hide the done ones' : `Show ${done} done`}</button>` : ''}
       ${missing ? `<button class="chip" data-act="kids-import">Add the ${missing} open ${missing === 1 ? 'one' : 'ones'} to my board</button>` : ''}
       <button class="chip" data-act="${epic ? 'new-in-epic' : 'new-subtask'}">${epic ? 'New ticket in this epic' : 'New sub-task'}</button>
     </div></div>`;
@@ -1100,6 +1309,11 @@ function renderSettings() {
       <div class="chips" style="margin-top:14px"><label class="chip"><input type="checkbox" data-ch="set" data-path="settings.updateCheck" ${s.updateCheck ? 'checked' : ''}> Check automatically once a day</label></div>
       <p class="help">The check asks github.com for the newest release of FocusQuest and sends none of your data. A new version is only installed when you click "Install update".</p>
     </div>` : ''}
+
+    <div class="card"><h2>Diagnostics</h2>
+      <p class="lead">If something does not work, the log shows what FocusQuest did and where it failed.</p>
+      <div class="row wrap"><button class="btn" data-act="diag">Show the log</button>${SERVED ? `<button class="btn quiet" data-act="helper-restart">Restart the helper</button>` : ''}</div>
+    </div>
 
     <div class="card"><h2>Your data</h2>
       <p class="lead">${SERVED ? 'Everything is saved in the data folder next to Start-FocusQuest.cmd. A dated copy is kept for the last 14 days.' : 'Everything is saved in this browser. Clearing the browsing data of this browser deletes it, so save a backup file now and then.'}</p>
@@ -1291,8 +1505,8 @@ const ACT = {
   },
   'close-ticket'(el, it) { if (it) closeTicketFlow(it); },
   'now-skip'(el, it) { if (it) { UI.skipped.add(it.id); if (it.focus) { it.focus = false; save(); } refreshBoard(); } },
-  'cycle-prio'(el, it) { it.prio = it.prio === 1 ? 3 : it.prio - 1; save(); refreshBoard(); if (UI.sel === it.id) renderDrawer(); },
-  'set-prio'(el, it) { it.prio = +el.dataset.p; UI.planOpen = true; save(); refreshBoard(); renderDrawer(); },
+  'cycle-prio'(el, it) { it.prio = it.prio === 1 ? 3 : it.prio - 1; it.ord = undefined; save(); refreshBoard(); if (UI.sel === it.id) renderDrawer(); },
+  'set-prio'(el, it) { it.prio = +el.dataset.p; it.ord = undefined; UI.planOpen = true; save(); refreshBoard(); renderDrawer(); },
   focus(el, it) { const on = !it.focus; S.items.forEach(i => { i.focus = false; }); it.focus = on; UI.skipped.delete(it.id); save(); refreshBoard(); },
   'due-q'(el, it) {
     const q = el.dataset.q, now = new Date();
@@ -1425,7 +1639,8 @@ const ACT = {
     if (!it) {
       if (!requireJira()) return;
       busy(el, true, 'Adding');
-      const r = await importKeys([key]); it = ticketByKey(key);
+      const from = UI.sel ? byId(UI.sel) : null;              // opened from a ticket: it joins that ticket's context
+      const r = await importKeys([key], from ? (from.ctx || null) : undefined); it = ticketByKey(key);
       if (!it) { busy(el, false); toast((r.failed[0] && r.failed[0].msg) || `${key} could not be added.`, { kind: 'bad', ttl: 8000 }); return; }
     }
     if (UI.view !== 'board') { UI.view = 'board'; renderMain(); }
@@ -1434,12 +1649,47 @@ const ACT = {
   async 'kids-import'(el, it) {
     if (!requireJira()) return;
     busy(el, true, 'Adding');
-    const r = await importKeys(openKids(it.jira).filter(k => !ticketByKey(k.key)).map(k => k.key));
+    const r = await importKeys(openKids(it.jira).filter(k => !ticketByKey(k.key)).map(k => k.key), it.ctx || null);
     renderDrawer();
     if (r.failed.length) toast(`${r.failed.length} could not be added: ${r.failed[0].msg}`, { kind: 'bad', ttl: 8000 });
   },
   'new-subtask'(el, it) { newSubtask(it, el); },
   'new-in-epic'(el, it) { if (requireJira()) openTicketForm({ epic: it.jira.key }); },
+
+  'ctx-sel'(el) { selectCtx(el.closest('[data-ctx]').dataset.ctx); },
+  'ctx-new'() { ctxDialog(null); },
+  'ctx-edit'(el) { const c = ctxById(el.closest('[data-ctx]').dataset.ctx); if (c) ctxDialog(c, () => { if (UI.view === 'board') renderBoard(); if (UI.sel) renderDrawer(); }); },
+  'ctx-scroll'(el) { const box = $('#ctxs'); if (box) box.scrollBy({ left: +el.dataset.dir * Math.max(200, box.clientWidth * 0.7), behavior: motionOk() ? 'smooth' : 'auto' }); },
+  'kids-toggle'(el, it) { if (UI.kidsDone.has(it.id)) UI.kidsDone.delete(it.id); else UI.kidsDone.add(it.id); renderDrawer(); },
+  diag() { openDiag(); },
+  async 'diag-copy'(el) {
+    const ta = $('#dg-text'); if (!ta) return;
+    try { await navigator.clipboard.writeText(ta.value); } catch (e) { ta.select(); try { document.execCommand('copy'); } catch (e2) { /* select is enough to copy by hand */ } }
+    el.textContent = 'Copied';
+  },
+  'diag-save'() {
+    const ta = $('#dg-text'); if (!ta) return;
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([ta.value], { type: 'text/plain' }));
+    a.download = `focusquest-log-${today()}.txt`; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  },
+  'page-reload'() { location.reload(); },
+  async 'helper-restart'(el) {
+    busy(el, true, 'Restarting');
+    await flush();
+    const want = /^\d/.test(APP_VERSION) ? APP_VERSION : '';
+    try { await api('POST', '/api/restart'); }
+    catch (e) {
+      // a helper from before 1.0.13 cannot restart itself, it can only stop
+      try { await api('POST', '/api/quit'); } catch (e2) { /* already gone */ }
+      helperDown = true; renderRailFoot();
+      toast('The old helper has stopped. Start FocusQuest again from the Start menu. This page then reloads by itself.', { sticky: true });
+      awaitHelper(want, 15 * 60000);
+      return;
+    }
+    if (!(await awaitHelper(want, 45000))) { busy(el, false); toast('The helper did not come back by itself. Start FocusQuest again from the Start menu, then reload this page.', { kind: 'bad', sticky: true }); }
+  },
 
   'update-open'() { openUpdate(); },
   'update-apply'(el) { applyUpdate(el); },
@@ -1524,9 +1774,13 @@ const CH = {
   },
   'tf-form'(el) { tfCollect(); tfSetForm(el.value); },
   'form-sel'(el) { UI.formSel = el.value; renderSettings(); },
+  ctx(el, it) {
+    if (el.value === '__new') { el.value = it.ctx || ''; ctxDialog(null, c => { setCtx(it, c.id); if (UI.view === 'board') renderBoard(); renderDrawer(); }); return; }
+    UI.planOpen = true; setCtx(it, el.value || null);
+  },
   async autostart(el) {
     try { const r = await api('POST', '/api/autostart', { enabled: el.checked }); meta.autostart = !!(r && r.autostart); }
-    catch (e) { toast(e.message, { kind: 'bad', ttl: 8000 }); }
+    catch (e) { toast(e.status === 404 ? 'The helper that is running is older than this page and cannot do this yet. Restart FocusQuest (Settings, Diagnostics, "Restart the helper").' : e.message, { kind: 'bad', ttl: 10000 }); }
     el.checked = !!meta.autostart;
   },
   'form-default'(el) { if (el.checked) { S.ticketCfg.defaultForm = curForm().id; save(); renderSettings(); } },
@@ -1544,6 +1798,7 @@ const CH = {
 
 /* ------------------------------------------------------------------ wiring */
 function wire() {
+  wireDrag();
   document.addEventListener('click', e => {
     const el = e.target.closest('[data-act]'); if (!el || el.disabled) return;
     const fn = ACT[el.dataset.act]; if (!fn) return;

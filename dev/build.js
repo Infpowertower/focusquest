@@ -3,7 +3,10 @@
 const fs = require('fs'), path = require('path');
 const root = path.join(__dirname, '..');
 const src = f => fs.readFileSync(path.join(root, 'src', f), 'utf8');
-const js = src('core.js') + '\n' + src('ui.js');
+// A release build stamps its version into the page (FQ_VERSION). Without it the placeholder stays and the
+// page skips the "page and helper match" check; the test server stamps it when it serves the page.
+const stamp = t => process.env.FQ_VERSION ? t.split('__FQ_VERSION__').join(process.env.FQ_VERSION) : t;
+const js = stamp(src('core.js') + '\n' + src('ui.js'));
 if (js.includes('</scr' + 'ipt')) throw new Error('script end tag inside JS');
 const page = head => src('shell.html').replace('<!--HEAD-->', () => head).replace('/*CSS*/', () => src('app.css')).replace('/*JS*/', () => js);
 

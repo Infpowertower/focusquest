@@ -3,7 +3,8 @@ const http = require('http'), fs = require('fs'), path = require('path');
 const PORT = +process.env.FQ_PORT || 8765, JPORT = +process.env.FQ_JIRA_PORT || 8799, SECRET = 'devsecret', TOKEN = 'testtoken';
 const root = path.join(__dirname, '..'), dataFile = process.env.FQ_DATA || path.join(__dirname, 'data.json');
 let cfg = { baseUrl: '', token: '' };
-let version = '1.0.0';
+let version = '1.0.0', pageVersion = '', oldHelper = false;
+const hlog = ['2026-11-25 08:00:00  FocusQuest helper (test stand-in) starting'];
 let awake = new Date().toISOString(), autostart = false;   // the real helper notices PC starts and wake-ups, and owns the Startup shortcut
 const RELEASE = { latest: '1.1.0', publishedAt: '2026-11-20T10:00:00Z', notes: "## What's new\n- Ticket forms for several projects\n- Statistics in the sidebar\n\n<!-- install -->\n## Install\nDownload the zip file." };
 const body = req => new Promise(r => { let b = ''; req.on('data', c => b += c); req.on('end', () => r(b)); });
@@ -12,17 +13,23 @@ const send = (res, s, o, ct) => { const t = typeof o === 'string' ? o : JSON.str
 http.createServer(async (req, res) => {
   const u = new URL(req.url, 'http://x'); const p = u.pathname;
   if (req.headers.host !== `localhost:${PORT}`) return send(res, 403, { errorMessages: ['Forbidden.'] });
-  if (req.method === 'GET' && p === '/') return send(res, 200, fs.readFileSync(path.join(root, 'app.html'), 'utf8').split('__FQ_TOKEN__').join(SECRET), 'text/html; charset=utf-8');
-  if (p === '/api/ping') return send(res, 200, { app: 'focusquest' });
+  // the page is stamped with a version like a release build; pageVersion differs from version when the test plays "new files, old helper still running"
+  if (req.method === 'GET' && p === '/') return send(res, 200, fs.readFileSync(path.join(root, 'app.html'), 'utf8').split('__FQ_TOKEN__').join(SECRET).split('__FQ_VERSION__').join(pageVersion || version), 'text/html; charset=utf-8');
+  if (p === '/api/ping') return send(res, 200, { app: 'focusquest', version });
   if (p === '/favicon.ico') return send(res, 204, '');
   if (req.headers['x-fq-token'] !== SECRET) return send(res, 403, { errorMessages: ['Forbidden.'] });
   if (p === '/api/state') return send(res, 200, { version, awakeSince: awake, autostart, jira: { baseUrl: cfg.baseUrl, hasToken: !!cfg.token } });
+  if (p === '/api/test/page-version' && req.method === 'POST') { const o = JSON.parse(await body(req)); pageVersion = o.v; oldHelper = !!o.old; return send(res, 200, { ok: true }); }
+  if (p === '/api/quit' && req.method === 'POST') { if (pageVersion) { version = pageVersion; oldHelper = false; } return send(res, 200, { ok: true }); }   // as if FocusQuest was started again right after
+  if (oldHelper && /^\/api\/(restart|autostart|log|update)/.test(p)) return send(res, 404, { errorMessages: ['Not found.'] });
+  if (p === '/api/restart' && req.method === 'POST') { if (pageVersion) version = pageVersion; hlog.push('2026-11-25 08:01:00  Restarting.'); return send(res, 200, { ok: true, restarting: true }); }
+  if (p === '/api/log') return send(res, 200, { lines: hlog });
   if (p === '/api/autostart' && req.method === 'POST') { autostart = !!JSON.parse(await body(req)).enabled; return send(res, 200, { ok: true, autostart }); }
   if (p === '/api/test/awake' && req.method === 'POST') { awake = JSON.parse(await body(req)).t; return send(res, 200, { ok: true }); }   // test stand-in only: pretend the PC just started
   if (p === '/api/update/check') return send(res, 200, Object.assign({ current: version, available: version !== RELEASE.latest, ok: true, message: '', checkedAt: new Date().toISOString() }, RELEASE));
   if (p === '/api/update/apply' && req.method === 'POST') {
     if (version === RELEASE.latest) return send(res, 409, { errorMessages: ['FocusQuest is already up to date.'] });
-    version = RELEASE.latest;   // the real helper replaces its files and restarts here
+    version = RELEASE.latest; pageVersion = '';   // the real helper replaces its files and restarts here
     return send(res, 200, { ok: true, restarting: true, version });
   }
   if (p === '/api/data' && req.method === 'GET') return send(res, 200, fs.existsSync(dataFile) ? fs.readFileSync(dataFile, 'utf8') : 'null');

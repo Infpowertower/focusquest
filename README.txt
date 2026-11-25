@@ -36,8 +36,10 @@ click "Install update". FocusQuest downloads the version from GitHub, checks it,
 its program files, restarts by itself and reloads the page. Your data is not touched.
 Settings > Updates has "Check for updates" and a switch for the daily check.
 
-By hand: download the newer zip file, close the helper window and do the install steps
-again (the new zip file has to be unblocked too). Your data is kept.
+By hand: download the newer zip file and do the install steps again (the new zip file
+has to be unblocked too). Your data is kept. A FocusQuest that is still running is
+replaced by the new one. If the page ever says "The helper is still version ...",
+click that line: the old helper is restarted.
 
 Going back: every update keeps the version before it in data\update\previous. Close the
 helper window, copy the files from there into the FocusQuest folder and start it again.
@@ -90,6 +92,13 @@ EVERYDAY USE
 Add a to-do      type in the box at the top, press Enter.  Key N or / jumps to the box.
                  !1 !2 !3 set the priority, @today @tomorrow @fri @24.12. @14:30 set the due date.
 Prioritize       click the High / Medium / Low label on a row, or the star to make it your focus.
+Order            drag a row up or down. Dropping it in another priority changes its priority.
+                 With the keyboard: Alt + arrow up or down on a row.
+Contexts         "New context" gathers what belongs together, for example everything for one
+                 product. The contexts are the cards above the list: click one to see only
+                 that, drag a row onto a card to move it there. In a to-do or ticket the
+                 context is in its details. While typing a new to-do, #name puts it into a
+                 context (#web-shop for "Web shop"); an unknown name creates the context.
 Up next          the big card shows one thing. "Not now" shows another one.
 Due + reminder   open an item. Without a separate reminder you are reminded on the due day
                  (at the due time, or at 09:00 if there is none; change the time in Settings).
@@ -102,8 +111,9 @@ To-do to ticket  open the to-do > "Create Jira ticket from this". Choose a templ
                  filled in.
 Statistics       the left side shows what you created, closed and commented today.
                  Rewards shows the totals.
-Sub-tickets      a ticket with sub-tasks, or an epic, lists them in its details. Click one
-                 to open it (it is added to your board if needed). "New sub-task" and
+Sub-tickets      a ticket with sub-tasks, or an epic, lists the open ones in its details
+                 ("Show n done" brings the finished ones). Click one to open it (it is added
+                 to your board, in the same context, if needed). "New sub-task" and
                  "New ticket in this epic" create one. While sub-tickets are open, the ticket
                  above them cannot be closed and is not suggested as "Up next".
                  For "New ticket in this epic" the ticket form needs the field "Epic Link"
@@ -137,6 +147,12 @@ IF SOMETHING DOES NOT WORK
                                  you unblock them. "AllSigned" means: the scripts cannot run
                                  until your IT department signs them. Use app.html without
                                  the helper in that case (see above).
+Something else is wrong          Settings > Diagnostics > "Show the log" lists what FocusQuest
+                                 did and where it failed. "Copy" puts it on the clipboard.
+                                 The helper writes the same to data\helper.log.
+"Not found" for a new function   The helper that is running is older than the page. Click
+                                 "The helper is still version ..." at the bottom left, or
+                                 start FocusQuest again from the Start menu.
 Helper window closes at once     Open PowerShell in the FocusQuest folder and run:
                                    powershell -ExecutionPolicy Bypass -File .\server.ps1
                                  to read the error message.

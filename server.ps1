@@ -14,6 +14,7 @@ trap {
     Write-Host ''
     Write-Host 'FocusQuest could not start:' -ForegroundColor Red
     Write-Host $_.Exception.Message -ForegroundColor Red
+    try { Write-Log ('FATAL ' + $_.Exception.Message + ' | ' + ($_.ScriptStackTrace -replace '\s+', ' ')) } catch { }
     Write-Host ''
     Read-Host 'Press Enter to close this window' | Out-Null
     exit 1
@@ -66,6 +67,33 @@ if (Test-Path -LiteralPath $versionFile) {
 if (-not (Test-Path -LiteralPath $appFile)) { throw "app.html is missing. It must be in the same folder as server.ps1 ($root)." }
 if (-not (Test-Path -LiteralPath $dataDir)) { New-Item -ItemType Directory -Path $dataDir | Out-Null }
 
+# ---------------------------------------------------------------- log
+# What the helper did, for finding problems: kept in memory for the page (Settings, Diagnostics) and in data\helper.log.
+# It holds request paths, status codes and error texts. No token, no ticket contents; the Windows user
+# folder and the Jira host are replaced by placeholders.
+$logFile = Join-Path $dataDir 'helper.log'
+$script:log = New-Object System.Collections.Generic.List[string]
+$script:logMask = @()
+$script:lastStatus = 0
+$script:lastError = ''
+try {
+    if ((Test-Path -LiteralPath $logFile) -and ((Get-Item -LiteralPath $logFile).Length -gt 300000)) {
+        Move-Item -LiteralPath $logFile -Destination "$logFile.old" -Force
+    }
+} catch { }
+function Write-Log([string]$text) {
+    if (-not [string]::IsNullOrEmpty($env:USERPROFILE)) { $text = $text.Replace($env:USERPROFILE, '%USERPROFILE%') }
+    foreach ($m in $script:logMask) { if (-not [string]::IsNullOrEmpty($m)) { $text = $text.Replace($m, '<jira>') } }
+    $line = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss') + '  ' + $text
+    $script:log.Add($line)
+    if ($script:log.Count -gt 400) { $script:log.RemoveRange(0, $script:log.Count - 400) }
+    try { [System.IO.File]::AppendAllText($logFile, $line + "`r`n", $utf8) } catch { }
+}
+function Set-LogMask {
+    $script:logMask = @()
+    try { if (-not [string]::IsNullOrEmpty([string]$cfg.jiraBaseUrl)) { $script:logMask = @(([Uri][string]$cfg.jiraBaseUrl).Host) } } catch { }
+}
+
 Add-Type -AssemblyName System.Net.Http
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -103,6 +131,12 @@ if ([string]::IsNullOrEmpty([string]$cfg.secret)) {
     Save-Config
 }
 $basePort = [int]$cfg.port
+Set-LogMask
+Write-Log "FocusQuest helper $version starting in $root"
+try {
+    $pol = (Get-ExecutionPolicy -List | ForEach-Object { "$($_.Scope)=$($_.ExecutionPolicy)" }) -join ', '
+    Write-Log "PowerShell $($PSVersionTable.PSVersion), language mode $($ExecutionContext.SessionState.LanguageMode), execution policy $pol"
+} catch { }
 if ($Port -gt 0) { $basePort = $Port }
 
 # The Jira token is stored encrypted with Windows DPAPI: only your Windows user on this PC can read it.
@@ -149,6 +183,7 @@ function Send-Bytes($ctx, [int]$status, [string]$contentType, [byte[]]$bytes) {
     if ($null -eq $bytes) { $bytes = New-Object byte[] 0 }
     $res = $ctx.Response
     $res.StatusCode = $status
+    $script:lastStatus = $status
     $res.AddHeader('Cache-Control', 'no-store')
     $res.AddHeader('X-Content-Type-Options', 'nosniff')
     if ($status -eq 204 -or $status -eq 304) {
@@ -172,6 +207,7 @@ function Send-Json($ctx, [int]$status, $obj) {
 }
 
 function Send-Error($ctx, [int]$status, [string]$message) {
+    $script:lastError = $message
     Send-Json $ctx $status @{ errorMessages = @($message) }
 }
 
@@ -286,6 +322,7 @@ function Request-Release {
         $info.message = 'GitHub could not be reached: ' + $_.Exception.GetBaseException().Message
     }
     $script:update = $info
+    if ($info.ok) { Write-Log "Update check: newest release is '$($info.latest)', this is $version." } else { Write-Log "Update check failed: $($info.message)" }
     if ($info.ok) {
         try {
             $cfg.updateCache = (@{ at = $info.at.ToString('o'); latest = $info.latest; notes = $info.notes; publishedAt = $info.publishedAt } | ConvertTo-Json -Compress)
@@ -485,6 +522,13 @@ function Invoke-JiraRelay($ctx) {
     if ($null -ne $resp.Content.Headers.ContentType) { $ct = $resp.Content.Headers.ContentType.ToString() }
     $status = [int]$resp.StatusCode
     $resp.Dispose()
+    if ($status -ge 400) {
+        try {
+            $t = $utf8.GetString($bytes)
+            if ($t.Length -gt 300) { $t = $t.Substring(0, 300) }
+            $script:lastError = 'Jira said: ' + ($t -replace '\s+', ' ')
+        } catch { }
+    }
     Send-Bytes $ctx $status $ct $bytes
 }
 
@@ -508,7 +552,7 @@ function Invoke-Request($ctx) {
         return
     }
     if ($path -eq '/api/ping') {
-        Send-Text $ctx 200 'application/json; charset=utf-8' '{"app":"focusquest"}'
+        Send-Text $ctx 200 'application/json; charset=utf-8' ('{"app":"focusquest","version":"' + $version + '"}')
         return
     }
     if ($path -eq '/favicon.ico') {
@@ -565,7 +609,18 @@ function Invoke-Request($ctx) {
         }
         if ($null -ne $o.token) { $cfg.jiraToken = Protect-Token (([string]$o.token).Trim()) }
         Save-Config
+        Set-LogMask
         Send-Text $ctx 200 'application/json; charset=utf-8' '{"ok":true}'
+        return
+    }
+    if ($path -eq '/api/log' -and $method -eq 'GET') {
+        Send-Json $ctx 200 @{ lines = @($script:log.ToArray()) }
+        return
+    }
+    if ($path -eq '/api/restart' -and $method -eq 'POST') {
+        Send-Text $ctx 200 'application/json; charset=utf-8' '{"ok":true,"restarting":true}'
+        $script:restart = $true
+        $script:running = $false
         return
     }
     if ($path -eq '/api/autostart' -and $method -eq 'POST') {
@@ -590,6 +645,7 @@ function Invoke-Request($ctx) {
             Send-Error $ctx 409 'FocusQuest is already up to date.'
             return
         }
+        Write-Log "Installing update $($info.latest)."
         try {
             Install-Update $info | Out-Null
         } catch {
@@ -614,27 +670,59 @@ function Invoke-Request($ctx) {
 }
 
 # ---------------------------------------------------------------- start
-function Test-Existing([int]$p) {
+# Is a FocusQuest helper answering on this port? Returns its version ('' if it is too old to say), or $null if none.
+function Get-Existing([int]$p) {
     try {
         $cts = New-Object System.Threading.CancellationTokenSource
         $cts.CancelAfter(2000)
         $r = $client.GetAsync("http://localhost:$p/api/ping", $cts.Token).GetAwaiter().GetResult()
         $t = $r.Content.ReadAsStringAsync().GetAwaiter().GetResult()
-        return ($t -like '*focusquest*')
+        if ($t -notlike '*focusquest*') { return $null }
+        $v = ''
+        try { $v = [string]($t | ConvertFrom-Json).version } catch { }
+        return $v
+    } catch {
+        return $null
+    }
+}
+# Asks the helper on this port to stop. Works when it belongs to this folder (same secret).
+function Stop-Existing([int]$p) {
+    try {
+        $msg = New-Object System.Net.Http.HttpRequestMessage([System.Net.Http.HttpMethod]::Post, "http://localhost:$p/api/quit")
+        $msg.Headers.TryAddWithoutValidation('X-FQ-Token', [string]$cfg.secret) | Out-Null
+        $r = $client.SendAsync($msg).GetAwaiter().GetResult()
+        if ([int]$r.StatusCode -ne 200) { return $false }
     } catch {
         return $false
     }
+    for ($n = 0; $n -lt 40; $n++) {
+        Start-Sleep -Milliseconds 250
+        if ($null -eq (Get-Existing $p)) { return $true }
+    }
+    return $false
 }
 
 $listener = $null
 $listenPort = $basePort
 for ($i = 0; $i -lt 10; $i++) {
     $candidate = $basePort + $i
-    if (Test-Existing $candidate) {
-        Write-Host "FocusQuest is already running on http://localhost:$candidate/"
-        if (-not $NoBrowser) { Start-Process "http://localhost:$candidate/" }
-        Start-Sleep -Seconds 2
-        exit 0
+    $other = Get-Existing $candidate
+    if ($null -ne $other) {
+        # A helper of another version is still running from before an update by hand: this one takes over.
+        # Otherwise the new page would talk to the old helper.
+        $replaced = $false
+        if ($other -ne $version) {
+            Write-Log "A helper of version '$other' is running on port $candidate. Replacing it."
+            $replaced = Stop-Existing $candidate
+            if (-not $replaced) { Write-Log 'It did not stop (it belongs to another folder, or it is busy).' }
+        }
+        if (-not $replaced) {
+            Write-Host "FocusQuest is already running on http://localhost:$candidate/"
+            Write-Log "Already running on port $candidate. This start only opens the browser."
+            if (-not $NoBrowser) { Start-Process "http://localhost:$candidate/" }
+            Start-Sleep -Seconds 2
+            exit 0
+        }
     }
     $l = New-Object System.Net.HttpListener
     $l.Prefixes.Add("http://localhost:$candidate/")
@@ -657,6 +745,7 @@ Write-Host '  Keep this window open (minimized) while you use FocusQuest.'
 Write-Host '  Close it to stop FocusQuest. Your data is in the "data" folder.'
 Write-Host ''
 
+Write-Log "Listening on http://localhost:$listenPort/"
 if (-not $NoBrowser) { Start-Process "http://localhost:$listenPort/" }
 
 try {
@@ -665,10 +754,21 @@ try {
         while (-not $task.Wait(300)) { Update-Awake }
         Update-Awake
         $ctx = $task.Result
+        $what = $ctx.Request.HttpMethod + ' ' + $ctx.Request.Url.AbsolutePath
+        $script:lastStatus = 0
+        $script:lastError = ''
+        $watch = [System.Diagnostics.Stopwatch]::StartNew()
         try {
             Invoke-Request $ctx
             $script:lastTick = [DateTime]::UtcNow   # a long request (download, slow Jira) is not sleep
+            # routine calls (page load, saving, heartbeat) are only logged when they fail
+            if ($script:lastStatus -ge 400 -or $what -notmatch ' /(api/(ping|data|state|log)|favicon\.ico)?$') {
+                $line = "$what -> $($script:lastStatus) ($($watch.ElapsedMilliseconds) ms)"
+                if ($script:lastStatus -ge 400 -and $script:lastError -ne '') { $line += '  ' + $script:lastError }
+                Write-Log $line
+            }
         } catch {
+            Write-Log ("ERROR $what : " + $_.Exception.Message + ' | ' + ($_.ScriptStackTrace -replace '\s+', ' '))
             Write-Host ((Get-Date).ToString('HH:mm:ss') + '  ' + $_.Exception.Message) -ForegroundColor Yellow
             try { Send-Error $ctx 500 $_.Exception.Message } catch { }
             try { $ctx.Response.Abort() } catch { }
@@ -680,10 +780,11 @@ try {
     try { $ghClient.Dispose() } catch { }
 }
 
-# After an update: the listener above is closed, now the new version takes over the same address.
+# After an update or a requested restart: the listener above is closed, a fresh helper takes over the same address.
 if ($script:restart) {
     Write-Host ''
-    Write-Host '  Update installed. Starting the new version ...'
+    Write-Host '  Starting FocusQuest again ...'
+    Write-Log 'Restarting.'
     $exe = (Get-Process -Id $PID).Path
     $self = $MyInvocation.MyCommand.Path
     Start-Process -FilePath $exe -WindowStyle Minimized -ArgumentList "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$self`" -NoBrowser -Port $listenPort"

@@ -70,6 +70,9 @@ function Wait-Version([string]$ver) {
     }
     return $false
 }
+function Start-Helper {
+    return (Start-Process -FilePath 'powershell.exe' -PassThru -WindowStyle Hidden -ArgumentList "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Install\server.ps1`" -NoBrowser -Port $Port")
+}
 function Get-Hashes {
     $o = @{}
     foreach ($f in 'app.html', 'server.ps1', 'Start-FocusQuest.cmd', 'version.txt') { $o[$f] = (Get-FileHash -LiteralPath (Join-Path $Install $f)).Hash }
@@ -139,7 +142,7 @@ try {
 
     $fakeProc = Start-Process -FilePath 'node' -PassThru -WindowStyle Hidden -ArgumentList "`"$PSScriptRoot\fake-github.js`" `"$fake`" $FakePort"
     $env:FOCUSQUEST_UPDATE_API = "http://localhost:$FakePort/latest"
-    Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$Install\server.ps1`" -NoBrowser -Port $Port" | Out-Null
+    Start-Helper | Out-Null
     if (-not (Wait-Up $true)) { throw 'The helper did not start.' }
     $script:secret = [string]((Get-Content -LiteralPath (Join-Path $Install 'data\helper-config.json') -Raw) | ConvertFrom-Json).secret
 
@@ -169,6 +172,28 @@ try {
     Check ((Call 'GET' '/api/state').json.autostart -eq $true) 'state reports start with Windows'
     Check ((Call 'POST' '/api/autostart' '{"enabled":true}' -NoToken).status -eq 403) 'start with Windows without secret: refused'
     if (-not $hadLink) { Call 'POST' '/api/autostart' '{"enabled":false}' | Out-Null }
+
+    # ------------------------------------------------------------ log, second start, restart
+    $ping = (Invoke-WebRequest -UseBasicParsing -Uri "$base/api/ping" -TimeoutSec 5).Content | ConvertFrom-Json
+    Check ($ping.version -eq $cur) 'ping reports the version'
+    $lg = Call 'GET' '/api/log'
+    $all = (@($lg.json.lines) -join "`n")
+    Check ($lg.status -eq 200 -and $all -match 'FocusQuest helper \S+ starting' -and $all -match 'Listening on') 'log lists the start'
+    Check ($all -match 'POST /api/autostart -> 200' -and $all -match 'GET /api/state -> 403 .*Forbidden') 'log lists calls and refusals'
+    Check ($all -notmatch [regex]::Escape($script:secret) -and $all -notmatch [regex]::Escape($env:USERPROFILE)) 'log holds neither the secret nor the user folder'
+    Check ((Call 'GET' '/api/log' -NoToken).status -eq 403) 'log without secret: refused'
+    Check (Test-Path -LiteralPath (Join-Path $Install 'data\helper.log')) 'log is also written to data\helper.log'
+    $a1 = [string](Call 'GET' '/api/state').json.awakeSince
+    $second = Start-Helper
+    Check ($second.WaitForExit(30000)) 'second start of the same version: ends by itself'
+    Check ([string](Call 'GET' '/api/state').json.awakeSince -eq $a1) 'second start of the same version: the running helper is left alone'
+    Check ((Call 'POST' '/api/restart').status -eq 200) 'restart accepted'
+    $again = $false
+    for ($i = 0; $i -lt 60 -and -not $again; $i++) {
+        Start-Sleep -Milliseconds 500
+        try { $a2 = [string](Call 'GET' '/api/state').json.awakeSince; $again = ($a2 -ne '' -and $a2 -ne $a1) } catch { }
+    }
+    Check $again 'helper restarted by itself'
 
     # ------------------------------------------------------------ update check
     $r = (Call 'GET' '/api/update/check?force=1').json
@@ -233,6 +258,13 @@ try {
     Check ((Call 'GET' '/api/data').text -eq $data) 'data file still untouched'
     $page = Invoke-WebRequest -UseBasicParsing -Uri "$base/" -TimeoutSec 10
     Check ($page.Content -match 'test build 9\.9\.9' -and $page.Content -notmatch '__FQ_TOKEN__') 'updated page is served with the secret filled in'
+ 
+    # ------------------------------------------------------------ files updated by hand while the old helper keeps running
+    [System.IO.File]::WriteAllText((Join-Path $Install 'version.txt'), "9.9.10`r`n")
+    Start-Helper | Out-Null
+    Check (Wait-Version '9.9.10') 'a start from newer files replaces the helper that is still running'
+    $all = (@((Call 'GET' '/api/log').json.lines) -join "`n")
+    Check ($all -match "version '9\.9\.9' is running") 'the log says that it took over'
 } catch {
     Write-Host ("FAIL  test run stopped: " + $_.Exception.Message) -ForegroundColor Red
     Write-Host $_.ScriptStackTrace

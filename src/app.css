@@ -315,3 +315,33 @@ details.plan summary{cursor:pointer;font-weight:600}
 .row.lg .grow{flex:1;min-width:0;font-size:14px}
 .row.lg input{width:130px;flex:none}
 @media (max-width:700px){.dayrow{grid-template-columns:1fr auto}.d-det{grid-column:1/-1}}
+
+.group.empty{display:none}
+#list.drag .group.empty{display:block}
+#list.drag .group.empty .items{min-height:44px;border:2px dashed var(--line);border-radius:var(--r)}
+#list.drag .group.drop-in .items{border-color:var(--brand);background:var(--brand-soft)}
+.item[draggable=true]{cursor:grab}
+.item.dragging{opacity:.4}
+.item.drop-before{box-shadow:0 -3px 0 var(--brand)}
+.item.drop-after{box-shadow:0 3px 0 var(--brand)}
+.ctxbar{display:flex;align-items:stretch;gap:6px;margin-top:18px}
+.ctxs{display:flex;gap:10px;overflow-x:auto;scroll-snap-type:x proximity;scrollbar-width:none;flex:1;padding:3px}
+.ctxs::-webkit-scrollbar{display:none}
+.ctx{position:relative;flex:0 0 auto;min-width:150px;max-width:230px;scroll-snap-align:start;background:var(--panel);border:1px solid var(--line);border-radius:14px}
+.ctx-main{display:block;width:100%;text-align:left;background:none;border:0;padding:11px 14px;border-radius:14px}
+.ctx-main b{display:block;font-family:var(--display);font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ctx-main span{font-size:12.5px;color:var(--muted)}
+.ctx:hover{border-color:var(--brand)}
+.ctx.on{background:var(--brand);border-color:var(--brand)}
+.ctx.on .ctx-main b,.ctx.on .ctx-main span{color:var(--on-brand)}
+.ctx.on .ctx-main{padding-right:34px}
+.ctx-edit{position:absolute;right:6px;top:6px;border:0;background:none;color:var(--on-brand);opacity:.75;border-radius:7px;padding:2px 6px;font-size:14px}
+.ctx-edit:hover{opacity:1;background:rgba(255,255,255,.18)}
+.ctx.add{min-width:0;border-style:dashed;background:none;color:var(--muted);padding:0 16px;font-size:14px}
+.ctx.add:hover{color:var(--brand)}
+.ctxbar.drag .ctx[data-ctx]:not([data-ctx=all]){border-style:dashed;border-color:var(--brand)}
+.ctx.drop-on{box-shadow:0 0 0 4px var(--brand-soft);transform:scale(1.03)}
+.ctx-arrow{flex:none;border:1px solid var(--line);background:var(--panel);border-radius:10px;width:30px;font-size:20px;color:var(--muted);padding:0}
+.ctx-arrow:hover{color:var(--brand);border-color:var(--brand)}
+#cap-ctx{width:auto;max-width:170px;flex:none}
+#dg-text{font-family:Consolas,"Cascadia Mono",monospace;font-size:12.5px;white-space:pre;overflow:auto;margin-top:6px}

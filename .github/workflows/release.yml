@@ -42,6 +42,14 @@ jobs:
           npx playwright install --with-deps chromium
           node dev/run-tests.js
 
+      # the tests build without a version; the release build carries it
+      - name: Build with the version stamped in
+        env:
+          FQ_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          node dev/build.js --web
+          grep -q "APP_VERSION = '$FQ_VERSION'" app.html
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site/
