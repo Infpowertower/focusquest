@@ -14,6 +14,21 @@ const PORT = +process.env.FQ_PORT || 8765, JPORT = +process.env.FQ_JIRA_PORT || 
   let failed = 0;
   const step = async (name, fn) => { try { await fn(); console.log('ok  ', name); } catch (e) { failed++; console.log('FAIL', name, '\n     ', e.message.split('\n')[0], ((e.stack || '').match(/test\.js:\d+/) || [''])[0]); await shot('fail-' + name.replace(/\W+/g, '_')); } };
   const xp = () => page.evaluate(() => S.game.xp);
+  // Drag with the mouse like a person: press, move onto the target, move again (browsers only report "dragover",
+  // which allows the drop, from the second move on), release. The target is looked up again after the drag has
+  // started, because rows shift when the empty priorities appear.
+  const drag = async (from, to, position) => {
+    await page.locator(from).hover();
+    await page.mouse.down();
+    const src = await page.locator(from).boundingBox();
+    await page.mouse.move(src.x + src.width / 2 + 12, src.y + src.height / 2 + 12, { steps: 4 });
+    const opt = position ? { position } : {};
+    await page.locator(to).hover(opt);
+    await page.locator(to).hover(opt);
+    await page.waitForTimeout(60);
+    await page.mouse.up();
+    await page.waitForTimeout(60);
+  };
 
   await page.goto(`http://localhost:${PORT}/`);
   await page.evaluate(() => { Math.random = () => 0.5; });   // no lucky doubles, so XP is predictable
@@ -335,22 +350,19 @@ const PORT = +process.env.FQ_PORT || 8765, JPORT = +process.env.FQ_JIRA_PORT || 
     assert.ok(before.length >= 3, 'needs three medium rows');
     const row = t => `#list .item:has(.title:text-is("${t}"))`;
     // the last medium row goes to the top of medium
-    await page.dragAndDrop(row(before[before.length - 1]) + ' .ibody', row(before[0]), { targetPosition: { x: 200, y: 4 } });
+    await drag(row(before[before.length - 1]) + ' .ibody', row(before[0]), { x: 200, y: 4 });
     let now = await order(2);
     assert.equal(now[0], before[before.length - 1]); assert.equal(now[1], before[0]);
     assert.deepEqual(await page.$$eval('#list .group[data-prio="2"] .item .title', els => els.map(e => e.textContent)), now, 'the list shows the new order');
     // a row dropped below a high-priority row becomes high priority
     const high = await order(1), moved = now[now.length - 1];
-    await page.dragAndDrop(row(moved) + ' .ibody', row(high[0]), { targetPosition: { x: 200, y: 40 } });
+    await drag(row(moved) + ' .ibody', row(high[0]), { x: 200, y: 40 });
     assert.deepEqual((await order(1)).slice(0, 2), [high[0], moved]);
     assert.equal(await page.evaluate(t => S.items.find(i => itemTitle(i) === t).prio, moved), 1);
     // low priority is empty and only shows while dragging; dropping there works too
     assert.equal(await page.locator('#list .group[data-prio="3"]').isVisible(), false);
-    await page.hover(row(moved) + ' .ibody'); await page.mouse.down(); await page.mouse.move(600, 500, { steps: 5 });
-    const low = page.locator('#list .group[data-prio="3"] .items');
-    await low.waitFor({ state: 'visible' });
-    const box = await low.boundingBox();
-    await page.mouse.move(box.x + 100, box.y + 20, { steps: 5 }); await page.mouse.up();
+    await drag(row(moved) + ' .ibody', '#list .group[data-prio="3"] .items');
+    assert.equal(await page.locator('#list .group[data-prio="3"]').isVisible(), true);
     assert.equal(await page.evaluate(t => S.items.find(i => itemTitle(i) === t).prio, moved), 3);
     // keyboard: Alt + arrow up moves it to the end of medium
     await page.focus(row(moved) + ' .ibody');
@@ -386,11 +398,11 @@ const PORT = +process.env.FQ_PORT || 8765, JPORT = +process.env.FQ_JIRA_PORT || 
     await shot('16-contexts');
     // drag a row from "Everything" onto a context
     await page.click('#ctxbar .ctx[data-ctx=all] .ctx-main');
-    await page.dragAndDrop('#list .item:has-text("Book room for sprint review") .ibody', `#ctxbar .ctx[data-ctx="${shop}"]`);
+    await drag('#list .item:has-text("Book room for sprint review") .ibody', `#ctxbar .ctx[data-ctx="${shop}"]`);
     await page.waitForSelector('.toast:has-text("Moved to Web shop")');
     assert.equal(await page.evaluate(() => S.items.find(i => i.title === 'Book room for sprint review').ctx), shop);
     // and back out again by dropping it on "No context"
-    await page.dragAndDrop('#list .item:has-text("Book room for sprint review") .ibody', '#ctxbar .ctx[data-ctx=none]');
+    await drag('#list .item:has-text("Book room for sprint review") .ibody', '#ctxbar .ctx[data-ctx=none]');
     assert.equal(await page.evaluate(() => S.items.find(i => i.title === 'Book room for sprint review').ctx), null);
     // in the details: for a to-do and for a ticket, also with a context that does not exist yet
     await page.click('#list .item:has-text("Book room for sprint review") .ibody');
